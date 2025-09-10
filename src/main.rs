@@ -250,7 +250,8 @@ async fn run_client(args: Args) -> Result<()> {
     let remote_peer = quicnet::server::peer_id(&conn)?;
 
     if !args.quiet {
-        eprintln!("connected to {} ({})", remote_peer, conn.remote_address());
+        eprintln!("⚠️  UNVERIFIED connection to {} ({})", remote_peer, conn.remote_address());
+        eprintln!("WARNING: Peer identity not cryptographically verified!");
     }
 
     // open stream
@@ -314,7 +315,7 @@ async fn handle_connection(
     let remote = conn.remote_address();
 
     if !quiet {
-        eprintln!("[{}] connected from {}", peer, remote);
+        eprintln!("[{}] ⚠️  UNVERIFIED connection from {}", peer, remote);
     }
 
     let (mut send, recv) = conn.accept_bi().await?;
