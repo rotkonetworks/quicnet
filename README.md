@@ -4,9 +4,45 @@ minimal peer-to-peer network protocol using quic transport and ed25519 identitie
 
 ## what it is
 
-quicnet provides encrypted, authenticated connections without dns or certificate authorities. every peer has an ed25519 identity. peers connect directly using ip addresses and verify each other cryptographically.
+quicnet provides encrypted, authenticated connections without dns or certificate
+authorities. every peer has an ed25519 identity. peers connect directly using ip
+addresses and verify each other cryptographically.
 
-think of it as ssh meets netcat over quic - your identity is your keypair, not a domain name.
+think of it as ssh meets netcat over quic - your identity is your keypair, not a
+domain name.
+
+## ⚠️ security warning
+
+**this is experimental software with known security limitations:**
+
+- **peer verification is currently broken** - the peer id extraction from
+certificates is not properly implemented in the current quinn 0.11 integration.
+the system falls back to using address-based hashing which completely bypasses
+cryptographic authentication.
+- **no actual peer identity verification** - while the code appears to verify
+peer certificates, the actual ed25519 public key extraction from quic handshakes
+is non-functional.
+- **irc bridge is incomplete** - messages are not properly routed between
+clients; it only echoes back to sender.
+- **openssh key parser is fragile** - uses hardcoded offsets that may fail with
+non-standard key formats.
+
+**do not use this for any security-critical applications.** this is a
+proof-of-concept that demonstrates the architecture but lacks proper
+cryptographic peer verification. the authentication system that is described in
+the documentation is not actually enforced due to implementation limitations.
+
+### known issues
+
+- `peer_id()` function returns fake ids based on connection address instead of
+certificate
+- client accepts any ed25519 certificate without verifying it matches expected
+peer
+- no protection against man-in-the-middle attacks in current state
+- irc mode can false-positive on regular text containing irc commands
+
+these issues will be addressed in future versions once proper certificate
+extraction is implemented for quinn 0.11.
 
 ## installation
 
@@ -210,12 +246,14 @@ quicnet peer_id@other_host
 | feature | quicnet | ssh | telnet | netcat |
 |---------|---------|-----|--------|--------|
 | encryption | always | yes | no | no |
-| authentication | mutual | server | no | no |
+| authentication | mutual* | server | no | no |
 | identity | ed25519 | various | none | none |
 | transport | quic | tcp | tcp | tcp/udp |
 | dns required | no | optional | yes | optional |
 | ca required | no | optional | n/a | n/a |
-| shell  | no | no | n/a | n/a |
+| shell | no | yes | yes | no |
+
+*authentication currently broken - see security warning
 
 ## license
 
