@@ -114,8 +114,12 @@ impl Target {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // initialize rustls crypto provider
+    rustls::crypto::ring::default_provider().install_default()
+        .expect("failed to install crypto provider");
+
     let args = Args::parse();
-    
+
     // determine mode
     if args.listen || args.target.is_none() {
         run_server(args).await
