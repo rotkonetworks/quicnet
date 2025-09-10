@@ -1,6 +1,6 @@
 [package]
 name = "quicnet"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["rotko networks"]
 license = "MIT OR Apache-2.0"
@@ -18,14 +18,14 @@ name = "quicnet"
 path = "src/main.rs"
 
 [dependencies]
-# core (required for quic)
+# core
 quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "net", "macros"] }
 
 # crypto
 ed25519-dalek = "2"
-rand = "0.8"  # required by ed25519-dalek
+rand = "0.8"
 
 # encoding
 base32 = "0.5"
@@ -45,15 +45,10 @@ anyhow = "1"
 
 [features]
 default = []
-irc = []
+coordinator = []
 
 [profile.release]
 lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
-
-[profile.release-small]
-inherits = "release"
-opt-level = "z"
-panic = "abort"

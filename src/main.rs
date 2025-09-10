@@ -1,5 +1,4 @@
-// src/main.rs
-// src/main.rs
+// minimal p2p quic with proper authentication
 use anyhow::Result;
 use clap::Parser;
 use quicnet::{Client, Identity, PeerId, Server};
@@ -12,15 +11,6 @@ use tokio::io::{stdin, AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[command(name = "quicnet")]
 #[command(version)]
 #[command(about = "peer-to-peer network protocol over quic")]
-#[command(long_about = "quicnet provides encrypted, authenticated connections without DNS or
-certificate authorities using ed25519 identities.
-
-Examples:
-  quicnet 127.0.0.1              # connect to localhost
-  quicnet -l                     # listen for connections
-  quicnet alice@host:8080        # connect with identity hint
-  quicnet -l -p 6667             # listen on port 6667")]
-#[command(arg_required_else_help = true)]
 struct Args {
     /// target: [user@]host[:port] or peer_id@host[:port]
     target: Option<String>,
@@ -36,28 +26,31 @@ struct Args {
     #[arg(short = 'i', long)]
     identity: Option<PathBuf>,
 
-    /// bind address (client) or listen address (server)
+    /// bind address
     #[arg(short = 'b', long)]
     bind: Option<String>,
 
-    /// port to listen on (alternative to positional)
+    /// listen port
     #[arg(short = 'p', long)]
     port_flag: Option<u16>,
+
+    /// relay through coordinator
+    #[arg(long = "via")]
+    via: Option<String>,
 
     /// verbose output
     #[arg(short = 'v', action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// quiet mode (no info messages)
+    /// quiet mode
     #[arg(short = 'q', long)]
     quiet: bool,
 
-    /// save generated identity
+    #[cfg(feature = "coordinator")]
     #[arg(long)]
-    save: Option<PathBuf>,
+    coordinator: bool,
 }
 
-// parse target with smart detection
 #[derive(Debug)]
 struct Target {
     identity_hint: Option<String>,
@@ -67,7 +60,6 @@ struct Target {
 
 impl Target {
     fn parse(s: &str, default_port: u16) -> Result<Self> {
-        // split on @ if present
         let (identity_hint, host_part) = if let Some((prefix, suffix)) = s.split_once('@') {
             (Some(prefix.to_string()), suffix)
         } else {
@@ -75,7 +67,6 @@ impl Target {
         };
 
         let (host, port) = Self::parse_host_port(host_part, default_port)?;
-
         Ok(Target { identity_hint, host, port })
     }
 
@@ -93,7 +84,7 @@ impl Target {
             }
         }
 
-        // bare ipv6 (contains :: but no port)
+        // bare ipv6
         if s.contains("::") && !s.starts_with('[') {
             return Ok((s.to_string(), default_port));
         }
@@ -105,7 +96,6 @@ impl Target {
             }
         }
 
-        // just hostname/ip
         Ok((s.to_string(), default_port))
     }
 
@@ -124,47 +114,39 @@ impl Target {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // initialize rustls crypto provider
     rustls::crypto::ring::default_provider().install_default()
         .expect("failed to install crypto provider");
 
     let args = Args::parse();
 
-    // determine mode
+    #[cfg(feature = "coordinator")]
+    if args.coordinator {
+        return run_coordinator(args).await;
+    }
+
     if args.listen {
         run_server(args).await
     } else if args.target.is_some() {
         run_client(args).await
     } else {
-        // clap's arg_required_else_help should prevent this
-        eprintln!("Error: Either specify a target to connect to or use -l to listen");
+        eprintln!("Error: specify target or use -l to listen");
         std::process::exit(1)
     }
 }
 
 async fn run_server(args: Args) -> Result<()> {
-    // create shared irc server state if irc feature enabled
-    #[cfg(feature = "irc")]
-    let irc_server = std::sync::Arc::new(quicnet::irc::IrcServer::new());
-
-    // determine listen address
     let listen_addr = if let Some(ref bind) = args.bind {
         if bind.contains(':') {
             bind.clone()
         } else {
-            let port = args.port_flag
-                .or(args.port)
-                .unwrap_or(quicnet::DEFAULT_PORT);
+            let port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
             format!("{}:{}", bind, port)
         }
     } else {
-        let port = args.port_flag
-            .or(args.port)
-            .unwrap_or(quicnet::DEFAULT_PORT);
-        format!("0.0.0.0:{}", port)
+        let port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
+        format!("[::]:{}", port)  // ipv6 by default
     };
 
-    // load identity
     let identity = load_identity(&args)?;
 
     if !args.quiet {
@@ -182,15 +164,6 @@ async fn run_server(args: Args) -> Result<()> {
         let verbose = args.verbose;
         let quiet = args.quiet;
         
-        #[cfg(feature = "irc")]
-        {
-            let irc = irc_server.clone();
-            tokio::spawn(async move {
-                let _ = handle_connection(incoming, verbose, quiet, Some(irc)).await;
-            });
-        }
-        
-        #[cfg(not(feature = "irc"))]
         tokio::spawn(async move {
             let _ = handle_connection(incoming, verbose, quiet).await;
         });
@@ -201,23 +174,15 @@ async fn run_server(args: Args) -> Result<()> {
 
 async fn run_client(args: Args) -> Result<()> {
     let target_str = args.target.clone().unwrap();
-
-    // parse target
     let default_port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
     let target = Target::parse(&target_str, default_port)?;
 
-    // override port if specified
     let target = if let Some(port) = args.port {
         Target { port, ..target }
     } else {
         target
     };
 
-    if args.verbose > 0 {
-        eprintln!("target: {:?}", target);
-    }
-
-    // load identity
     let identity = if let Some(hint) = &target.identity_hint {
         load_identity_with_hint(&args, hint)?
     } else {
@@ -228,33 +193,77 @@ async fn run_client(args: Args) -> Result<()> {
         eprintln!("peer id: {}", identity.peer_id());
     }
 
-    // bind address
     let bind_addr: SocketAddr = args.bind
         .as_deref()
-        .unwrap_or("0.0.0.0:0")
+        .unwrap_or("[::]:0")
         .parse()?;
 
-    let client = Client::new(bind_addr, identity)?;
+    let client = Client::new(bind_addr, identity.clone())?;
 
-    // check if hint is a peer id
-    let peer_id = target.identity_hint.as_ref()
-        .and_then(|h| PeerId::from_str(h).ok());
+    // handle --via coordinator relay
+    if let Some(via) = &args.via {
+        let coord_target = Target::parse(via, quicnet::DEFAULT_PORT)?;
+        let coord_addr = coord_target.to_socket_addr()?;
+        
+        if !args.quiet {
+            eprintln!("connecting via coordinator {}", coord_addr);
+        }
+        
+        // connect to coordinator
+        let (coord_conn, coord_id) = client.connect(coord_addr, None).await?;
+        
+        if !args.quiet {
+            eprintln!("connected to coordinator {}", coord_id);
+        }
+        
+        // request relay to target
+        let (mut send, mut recv) = coord_conn.open_bi().await?;
+        
+        // send relay request
+        let relay_request = format!("RELAY {}\n", target_str);
+        send.write_all(relay_request.as_bytes()).await?;
+        send.flush().await?;
+        
+        // check response
+        let mut response = String::new();
+        let mut reader = BufReader::new(&mut recv);
+        reader.read_line(&mut response).await?;
+        
+        if !response.starts_with("OK") {
+            anyhow::bail!("coordinator refused relay: {}", response.trim());
+        }
+        
+        if !args.quiet {
+            eprintln!("relay established to {}", target_str);
+        }
+        
+        // now pipe stdin/stdout through coordinator
+        pipe_through_connection(coord_conn).await?;
+        
+    } else {
+        // direct connection
+        let expected_peer = target.identity_hint.as_ref()
+            .and_then(|h| PeerId::from_str(h).ok());
 
-    let addr = target.to_socket_addr()?;
+        let addr = target.to_socket_addr()?;
 
-    if !args.quiet {
-        eprintln!("connecting to {}", addr);
+        if !args.quiet {
+            eprintln!("connecting to {}", addr);
+        }
+
+        let (conn, peer_id) = client.connect(addr, expected_peer.as_ref()).await?;
+
+        if !args.quiet {
+            eprintln!("connected to {} ({})", peer_id, conn.remote_address());
+        }
+
+        pipe_through_connection(conn).await?;
     }
 
-    let conn = client.connect(addr, peer_id.as_ref()).await?;
-    let remote_peer = quicnet::server::peer_id(&conn)?;
+    Ok(())
+}
 
-    if !args.quiet {
-        eprintln!("⚠️  UNVERIFIED connection to {} ({})", remote_peer, conn.remote_address());
-        eprintln!("WARNING: Peer identity not cryptographically verified!");
-    }
-
-    // open stream
+async fn pipe_through_connection(conn: quinn::Connection) -> Result<()> {
     let (mut send, recv) = conn.open_bi().await?;
 
     // spawn reader
@@ -305,17 +314,15 @@ async fn run_client(args: Args) -> Result<()> {
 }
 
 async fn handle_connection(
-    incoming: quinn::Incoming,
+    incoming: quicnet::server::AuthenticatedIncoming,
     verbose: u8,
     quiet: bool,
-    #[cfg(feature = "irc")] irc_server: Option<std::sync::Arc<quicnet::irc::IrcServer>>,
 ) -> Result<()> {
-    let conn = incoming.await?;
-    let peer = quicnet::server::peer_id(&conn)?;
-    let remote = conn.remote_address();
+    let remote = incoming.remote_address();
+    let (conn, peer_id) = incoming.accept().await?;
 
     if !quiet {
-        eprintln!("[{}] ⚠️  UNVERIFIED connection from {}", peer, remote);
+        eprintln!("[{}] connected from {}", peer_id, remote);
     }
 
     let (mut send, recv) = conn.accept_bi().await?;
@@ -324,117 +331,74 @@ async fn handle_connection(
     // echo server
     let mut line = String::new();
 
-    #[cfg(feature = "irc")]
-    let client_id = format!("{}-{}", peer, remote);
-    
-    #[cfg(feature = "irc")]
-    let mut irc_mode = false;
-
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => break,
             Ok(_) => {
                 if verbose > 1 {
-                    eprint!("[{}] < {}", peer, line);
+                    eprint!("[{}] < {}", peer_id, line);
                 }
-
-                #[cfg(feature = "irc")]
-                {
-                    // detect irc protocol
-                    if !irc_mode && quicnet::irc::is_irc(&line) {
-                        irc_mode = true;
-                        if verbose > 0 {
-                            eprintln!("[{}] irc mode", peer);
-                        }
-                    }
-
-                    if irc_mode {
-                        // handle irc command with shared server state
-                        if let Some(ref irc) = irc_server {
-                            if let Ok(cmd) = quicnet::irc::Command::parse(line.trim()) {
-                                let responses = irc.handle_command(
-                                    &client_id,
-                                    &peer.to_string(),
-                                    remote,
-                                    cmd,
-                                ).await;
-                                
-                                for response in responses {
-                                    if verbose > 1 {
-                                        eprintln!("[{}] > {}", peer, response);
-                                    }
-                                    send.write_all(format!("{}\r\n", response).as_bytes()).await?;
-                                }
-                            }
-                        }
-                    } else {
-                        // echo mode
-                        send.write_all(line.as_bytes()).await?;
-                    }
-                }
-
-                #[cfg(not(feature = "irc"))]
-                {
-                    // simple echo server
-                    send.write_all(line.as_bytes()).await?;
-                }
-
+                send.write_all(line.as_bytes()).await?;
                 send.flush().await?;
             }
             Err(e) => {
                 if verbose > 0 {
-                    eprintln!("[{}] error: {}", peer, e);
+                    eprintln!("[{}] error: {}", peer_id, e);
                 }
                 break;
             }
         }
     }
 
-    // cleanup on disconnect
-    #[cfg(feature = "irc")]
-    if irc_mode {
-        if let Some(ref irc) = irc_server {
-            // remove client from server state
-            let _ = irc.handle_command(
-                &client_id,
-                &peer.to_string(),
-                remote,
-                quicnet::irc::Command::Quit(Some("Connection closed".to_string())),
-            ).await;
-        }
-    }
-
     if !quiet {
-        eprintln!("[{}] disconnected", peer);
+        eprintln!("[{}] disconnected", peer_id);
     }
 
     conn.close(0u32.into(), b"");
     Ok(())
 }
 
+#[cfg(feature = "coordinator")]
+async fn run_coordinator(args: Args) -> Result<()> {
+    use quicnet::coordinator::Coordinator;
+    
+    let listen_addr = args.bind
+        .as_deref()
+        .unwrap_or("[::]")
+        .to_string();
+    
+    let port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
+    let addr: SocketAddr = format!("{}:{}", listen_addr, port).parse()?;
+    
+    let identity = load_identity(&args)?;
+    
+    if !args.quiet {
+        eprintln!("coordinator id: {}", identity.peer_id());
+        eprintln!("listening on {}", addr);
+    }
+    
+    let coordinator = Coordinator::new(addr, identity).await?;
+    coordinator.run().await
+}
+
 fn load_identity(args: &Args) -> Result<Identity> {
-    // explicit identity file
     if let Some(path) = &args.identity {
         return Identity::from_file(path);
     }
 
-    // try ssh key ~/.ssh/id_ed25519
     if let Ok(identity) = Identity::from_ssh_key(None) {
         return Ok(identity);
     }
 
-    // use or generate ~/.ssh/id_quicnet
     Identity::load_or_generate()
 }
 
 fn load_identity_with_hint(args: &Args, hint: &str) -> Result<Identity> {
-    // explicit identity overrides hint
     if let Some(path) = &args.identity {
         return Identity::from_file(path);
     }
 
-    // try hint as username for ssh key
     let ssh_paths = vec![
         dirs::home_dir().map(|h| h.join(".ssh").join(format!("id_ed25519_{}", hint))),
         dirs::home_dir().map(|h| h.join(".ssh").join(format!("id_{}", hint))),
@@ -452,6 +416,5 @@ fn load_identity_with_hint(args: &Args, hint: &str) -> Result<Identity> {
         }
     }
 
-    // fallback to default
     load_identity(args)
 }

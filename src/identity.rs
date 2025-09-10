@@ -1,8 +1,7 @@
-// src/identity.rs
+// ed25519 identity management
 use anyhow::Result;
 use ed25519_dalek::{SigningKey, Signer};
 use rand::rngs::OsRng;
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -37,7 +36,6 @@ impl PeerId {
         &self.0
     }
     
-    // short form for display (first 8 chars)
     pub fn short(&self) -> String {
         self.to_string().chars().take(8).collect()
     }
@@ -55,6 +53,7 @@ impl fmt::Debug for PeerId {
     }
 }
 
+#[derive(Clone)]
 pub struct Identity {
     signing_key: SigningKey,
     peer_id: PeerId,
@@ -63,7 +62,6 @@ pub struct Identity {
 impl Identity {
     pub fn generate() -> Self {
         let mut rng = OsRng;
-        // Generate random bytes and create signing key from them
         let mut secret = [0u8; 32];
         use rand::RngCore;
         rng.fill_bytes(&mut secret);
@@ -122,7 +120,7 @@ impl Identity {
         let marker = b"ssh-ed25519";
         let mut pos = MAGIC.len();
         
-        // find second occurrence of ssh-ed25519 (first is in public key section)
+        // find second occurrence
         for _ in 0..2 {
             pos = decoded[pos..]
                 .windows(marker.len())
@@ -153,7 +151,6 @@ impl Identity {
             Self::from_file(&default_path)
         } else {
             let identity = Self::generate();
-            // ensure .ssh directory exists
             if let Some(parent) = default_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -164,12 +161,10 @@ impl Identity {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        // ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         
-        // save with restricted permissions (like ssh keys)
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -180,7 +175,7 @@ impl Identity {
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .mode(0o600)  // read/write for owner only
+                .mode(0o600)
                 .open(path)?;
             
             file.write_all(&self.signing_key.to_bytes())?;
@@ -199,49 +194,4 @@ impl Identity {
     pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
         self.signing_key.sign(msg).to_bytes()
     }
-
-    pub fn certificate(&self) -> Result<(Vec<CertificateDer<'static>>, PrivatePkcs8KeyDer<'static>)> {
-        // create key pair from our ed25519 key
-        let mut pkcs8 = vec![
-            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
-            0x04, 0x22, 0x04, 0x20,
-        ];
-        pkcs8.extend_from_slice(&self.signing_key.to_bytes());
-        
-        let key_pair = rcgen::KeyPair::try_from(pkcs8.as_slice())?;
-        
-        // create certificate params with the new API
-        let params = rcgen::CertificateParams::new(vec![self.peer_id.to_string()])?;
-        // The algorithm is inferred from the key type (Ed25519)
-        
-        // generate self-signed certificate
-        let cert = params.self_signed(&key_pair)?;
-        
-        Ok((
-            vec![cert.der().clone()],
-            PrivatePkcs8KeyDer::from(key_pair.serialize_der()),
-        ))
-    }
-}
-
-// extract peer id from certificate
-pub fn verify_peer_cert(cert: &[u8]) -> Result<PeerId> {
-    // minimal x509 parser - just extract the ed25519 public key
-    let marker = &[0x2b, 0x65, 0x70]; // ed25519 oid
-    
-    let pos = cert.windows(marker.len())
-        .position(|w| w == marker)
-        .ok_or_else(|| anyhow::anyhow!("not an ed25519 cert"))?;
-    
-    // public key is ~10 bytes after oid
-    let key_offset = pos + marker.len() + 10;
-    
-    if key_offset + 32 > cert.len() {
-        anyhow::bail!("malformed certificate");
-    }
-    
-    let mut pubkey = [0u8; 32];
-    pubkey.copy_from_slice(&cert[key_offset..key_offset + 32]);
-    
-    Ok(PeerId::from_public_key(&pubkey))
 }

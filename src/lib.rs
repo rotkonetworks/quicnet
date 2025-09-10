@@ -1,10 +1,10 @@
-// src/lib.rs
+pub mod auth;
 pub mod identity;
 pub mod server;
 pub mod client;
 
-#[cfg(feature = "irc")]
-pub mod irc;
+#[cfg(feature = "coordinator")]
+pub mod coordinator;
 
 pub use identity::{Identity, PeerId};
 pub use server::Server;
