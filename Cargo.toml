@@ -30,6 +30,7 @@ rand = "0.8"
 # encoding
 base32 = "0.5"
 base64 = "0.22"
+bs58 = "0.5"
 
 # certificates
 rcgen = "0.13"

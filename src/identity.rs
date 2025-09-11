@@ -16,15 +16,16 @@ impl PeerId {
     }
 
     pub fn to_string(&self) -> String {
-        base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &self.0).to_lowercase()
+        bs58::encode(&self.0).into_string()
     }
 
     pub fn from_str(s: &str) -> Result<Self> {
-        let decoded = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, s.to_uppercase().as_str())
-            .ok_or_else(|| anyhow::anyhow!("invalid base32"))?;
+        let decoded = bs58::decode(s)
+            .into_vec()
+            .map_err(|e| anyhow::anyhow!("invalid base58: {}", e))?;
         
         if decoded.len() != 32 {
-            anyhow::bail!("invalid peer id length");
+            anyhow::bail!("invalid peer id length: expected 32, got {}", decoded.len());
         }
         
         let mut id = [0u8; 32];
@@ -36,8 +37,9 @@ impl PeerId {
         &self.0
     }
     
+    // base58 is already shorter, so show more chars
     pub fn short(&self) -> String {
-        self.to_string().chars().take(8).collect()
+        self.to_string().chars().take(12).collect()
     }
 }
 

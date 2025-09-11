@@ -4,112 +4,53 @@ use clap::Parser;
 use quicnet::{Client, Identity, PeerId, Server};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
-use std::io::Write;
-use tokio::io::{stdin, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser)]
 #[command(name = "quicnet")]
 #[command(version)]
-#[command(about = "peer-to-peer network protocol over quic")]
+#[command(about = "authenticated pipes over quic", long_about = None)]
+#[command(override_usage = "quicnet [OPTIONS] [TARGET]\n       quicnet -l [OPTIONS]")]
 struct Args {
-    /// target: [user@]host[:port] or peer_id@host[:port]
+    /// target: host[:port] or peer_id@host[:port]
     target: Option<String>,
 
-    /// port (overrides port in target)
-    port: Option<u16>,
-
-    /// listen mode
+    /// listen for connections
     #[arg(short = 'l', long)]
     listen: bool,
 
-    /// identity file
-    #[arg(short = 'i', long)]
+    /// port number
+    #[arg(short = 'p', long, value_name = "PORT")]
+    port: Option<u16>,
+
+    /// identity file (default: ~/.ssh/id_quicnet)
+    #[arg(short = 'i', long, value_name = "FILE")]
     identity: Option<PathBuf>,
 
-    /// bind address
-    #[arg(short = 'b', long)]
+    /// bind address (default: [::])
+    #[arg(short = 'b', long, value_name = "ADDR")]
     bind: Option<String>,
 
-    /// listen port
-    #[arg(short = 'p', long)]
-    port_flag: Option<u16>,
-
-    /// relay through coordinator
-    #[arg(long = "via")]
+    /// relay via coordinator
+    #[arg(long, value_name = "HOST")]
     via: Option<String>,
 
-    /// verbose output
-    #[arg(short = 'v', action = clap::ArgAction::Count)]
-    verbose: u8,
+    /// echo mode (reflect data back)
+    #[arg(long)]
+    echo: bool,
 
-    /// quiet mode
+    /// verbose output
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    /// suppress info messages
     #[arg(short = 'q', long)]
     quiet: bool,
 
     #[cfg(feature = "coordinator")]
+    /// run as coordinator
     #[arg(long)]
     coordinator: bool,
-}
-
-#[derive(Debug)]
-struct Target {
-    identity_hint: Option<String>,
-    host: String,
-    port: u16,
-}
-
-impl Target {
-    fn parse(s: &str, default_port: u16) -> Result<Self> {
-        let (identity_hint, host_part) = if let Some((prefix, suffix)) = s.split_once('@') {
-            (Some(prefix.to_string()), suffix)
-        } else {
-            (None, s)
-        };
-
-        let (host, port) = Self::parse_host_port(host_part, default_port)?;
-        Ok(Target { identity_hint, host, port })
-    }
-
-    fn parse_host_port(s: &str, default_port: u16) -> Result<(String, u16)> {
-        // handle [ipv6]:port
-        if s.starts_with('[') {
-            if let Some(end) = s.find(']') {
-                let host = s[1..end].to_string();
-                let port = if s.len() > end + 1 && s.chars().nth(end + 1) == Some(':') {
-                    s[end + 2..].parse()?
-                } else {
-                    default_port
-                };
-                return Ok((host, port));
-            }
-        }
-
-        // bare ipv6
-        if s.contains("::") && !s.starts_with('[') {
-            return Ok((s.to_string(), default_port));
-        }
-
-        // try host:port
-        if let Some((host, port_str)) = s.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                return Ok((host.to_string(), port));
-            }
-        }
-
-        Ok((s.to_string(), default_port))
-    }
-
-    fn to_socket_addr(&self) -> Result<SocketAddr> {
-        let addr_str = if self.host.contains(':') && !self.host.starts_with('[') {
-            format!("[{}]:{}", self.host, self.port)
-        } else {
-            format!("{}:{}", self.host, self.port)
-        };
-
-        addr_str.to_socket_addrs()?
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("failed to resolve {}", addr_str))
-    }
 }
 
 #[tokio::main]
@@ -119,6 +60,21 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // validate args
+    if !args.listen && args.target.is_none() {
+        #[cfg(feature = "coordinator")]
+        if !args.coordinator {
+            print_usage_and_exit();
+        }
+        #[cfg(not(feature = "coordinator"))]
+        print_usage_and_exit();
+    }
+
+    if args.listen && args.target.is_some() {
+        eprintln!("error: cannot specify both -l and target");
+        std::process::exit(1);
+    }
+
     #[cfg(feature = "coordinator")]
     if args.coordinator {
         return run_coordinator(args).await;
@@ -126,46 +82,59 @@ async fn main() -> Result<()> {
 
     if args.listen {
         run_server(args).await
-    } else if args.target.is_some() {
-        run_client(args).await
     } else {
-        eprintln!("Error: specify target or use -l to listen");
-        std::process::exit(1)
+        run_client(args).await
     }
 }
 
+fn print_usage_and_exit() -> ! {
+    eprintln!("usage: quicnet [OPTIONS] [TARGET]");
+    eprintln!("       quicnet -l [OPTIONS]\n");
+    eprintln!("examples:");
+    eprintln!("  quicnet -l                    # listen on default port");
+    eprintln!("  quicnet localhost             # connect to localhost");
+    eprintln!("  quicnet -l -p 5000            # listen on port 5000");
+    eprintln!("  quicnet host:5000             # connect to host:5000");
+    eprintln!("  quicnet peer_id@host          # verify peer identity");
+    eprintln!("\nrun 'quicnet --help' for all options");
+    std::process::exit(1);
+}
+
 async fn run_server(args: Args) -> Result<()> {
-    let listen_addr = if let Some(ref bind) = args.bind {
-        if bind.contains(':') {
-            bind.clone()
-        } else {
-            let port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
-            format!("{}:{}", bind, port)
-        }
+    let port = args.port.unwrap_or(quicnet::DEFAULT_PORT);
+    let bind = args.bind.as_deref().unwrap_or("::");
+    
+    let addr: SocketAddr = if bind == "::" {
+        format!("[::]:{}", port).parse()
     } else {
-        let port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
-        format!("[::]:{}", port)  // ipv6 by default
-    };
+        format!("{}:{}", bind, port).parse()
+    }.map_err(|_| anyhow::anyhow!("invalid bind address: {}:{}", bind, port))?;
 
     let identity = load_identity(&args)?;
-
-    if !args.quiet {
-        eprintln!("peer id: {}", identity.peer_id());
-    }
-
-    let addr: SocketAddr = listen_addr.parse()?;
+    let peer_id = identity.peer_id().to_string();
+    
     let server = Server::bind(addr, identity)?;
+    let actual_addr = server.local_addr()?;
 
     if !args.quiet {
-        eprintln!("listening on {}", server.local_addr()?);
+        eprintln!("peer id: {}", peer_id);
+        eprintln!("listening on {}", actual_addr);
+        if actual_addr.ip().is_loopback() {
+            eprintln!("connect: quicnet localhost:{}", actual_addr.port());
+        }
     }
 
     while let Some(incoming) = server.accept().await {
+        let echo = args.echo;
         let verbose = args.verbose;
         let quiet = args.quiet;
         
         tokio::spawn(async move {
-            let _ = handle_connection(incoming, verbose, quiet).await;
+            if let Err(e) = handle_connection(incoming, echo, verbose, quiet).await {
+                if verbose {
+                    eprintln!("connection error: {}", e);
+                }
+            }
         });
     }
 
@@ -173,149 +142,104 @@ async fn run_server(args: Args) -> Result<()> {
 }
 
 async fn run_client(args: Args) -> Result<()> {
-    let target_str = args.target.clone().unwrap();
-    let default_port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
-    let target = Target::parse(&target_str, default_port)?;
-
-    let target = if let Some(port) = args.port {
-        Target { port, ..target }
+    let target = args.target.clone().unwrap();
+    
+    // parse target
+    let (peer_hint, host_part) = if let Some((prefix, suffix)) = target.split_once('@') {
+        (Some(prefix), suffix)
     } else {
-        target
+        (None, target.as_str())
     };
 
-    let identity = if let Some(hint) = &target.identity_hint {
+    // parse host:port
+    let default_port = args.port.unwrap_or(quicnet::DEFAULT_PORT);
+    let addr = parse_address(host_part, default_port)?;
+
+    // load identity
+    let identity = if let Some(hint) = peer_hint {
         load_identity_with_hint(&args, hint)?
     } else {
         load_identity(&args)?
     };
 
     if !args.quiet {
-        eprintln!("peer id: {}", identity.peer_id());
+        eprintln!("peer id: {}", identity.peer_id().to_string());
     }
 
-    let bind_addr: SocketAddr = args.bind
-        .as_deref()
-        .unwrap_or("[::]:0")
-        .parse()?;
+    // bind address
+    let bind = args.bind.as_deref().unwrap_or("[::]:0");
+    let bind_addr: SocketAddr = bind.parse()
+        .map_err(|_| anyhow::anyhow!("invalid bind address: {}", bind))?;
 
-    let client = Client::new(bind_addr, identity.clone())?;
+    let client = Client::new(bind_addr, identity)?;
 
-    // handle --via coordinator relay
-    if let Some(via) = &args.via {
-        let coord_target = Target::parse(via, quicnet::DEFAULT_PORT)?;
-        let coord_addr = coord_target.to_socket_addr()?;
-        
-        if !args.quiet {
-            eprintln!("connecting via coordinator {}", coord_addr);
-        }
-        
-        // connect to coordinator
-        let (coord_conn, coord_id) = client.connect(coord_addr, None).await?;
-        
-        if !args.quiet {
-            eprintln!("connected to coordinator {}", coord_id);
-        }
-        
-        // request relay to target
-        let (mut send, mut recv) = coord_conn.open_bi().await?;
-        
-        // send relay request
-        let relay_request = format!("RELAY {}\n", target_str);
-        send.write_all(relay_request.as_bytes()).await?;
-        send.flush().await?;
-        
-        // check response
-        let mut response = String::new();
-        let mut reader = BufReader::new(&mut recv);
-        reader.read_line(&mut response).await?;
-        
-        if !response.starts_with("OK") {
-            anyhow::bail!("coordinator refused relay: {}", response.trim());
-        }
-        
-        if !args.quiet {
-            eprintln!("relay established to {}", target_str);
-        }
-        
-        // now pipe stdin/stdout through coordinator
-        pipe_through_connection(coord_conn).await?;
-        
-    } else {
-        // direct connection
-        let expected_peer = target.identity_hint.as_ref()
-            .and_then(|h| PeerId::from_str(h).ok());
-
-        let addr = target.to_socket_addr()?;
-
-        if !args.quiet {
-            eprintln!("connecting to {}", addr);
-        }
-
-        let (conn, peer_id) = client.connect(addr, expected_peer.as_ref()).await?;
-
-        if !args.quiet {
-            eprintln!("connected to {} ({})", peer_id, conn.remote_address());
-        }
-
-        pipe_through_connection(conn).await?;
+    // handle relay
+    if let Some(via) = args.via {
+        let via_addr = parse_address(&via, quicnet::DEFAULT_PORT)?;
+        return run_relayed(client, via_addr, &target, args.quiet).await;
     }
 
-    Ok(())
+    // direct connection
+    let expected_peer = peer_hint.and_then(|h| PeerId::from_str(h).ok());
+    
+    if !args.quiet {
+        eprintln!("connecting to {}", addr);
+    }
+
+    let (conn, peer_id) = client.connect(addr, expected_peer.as_ref()).await
+        .map_err(|e| anyhow::anyhow!("connection failed: {}", e))?;
+
+    if !args.quiet {
+        eprintln!("connected to {} ({})", peer_id, conn.remote_address());
+    }
+
+    pipe_bidirectional(conn).await
 }
 
-async fn pipe_through_connection(conn: quinn::Connection) -> Result<()> {
-    let (mut send, recv) = conn.open_bi().await?;
-
-    // spawn reader
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(recv);
-        let mut line = String::new();
-
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => {
-                    eprintln!("connection closed");
-                    std::process::exit(0);
-                }
-                Ok(_) => {
-                    print!("{}", line);
-                    let _ = std::io::stdout().flush();
-                }
-                Err(e) => {
-                    eprintln!("read error: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-    });
-
-    // write stdin to server
-    let mut stdin = BufReader::new(stdin());
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        match stdin.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {
-                send.write_all(line.as_bytes()).await?;
-                send.flush().await?;
-            }
-            Err(e) => {
-                eprintln!("stdin error: {}", e);
-                break;
-            }
-        }
+async fn run_relayed(
+    client: Client,
+    via_addr: SocketAddr,
+    target: &str,
+    quiet: bool,
+) -> Result<()> {
+    if !quiet {
+        eprintln!("connecting via {}", via_addr);
     }
 
-    conn.close(0u32.into(), b"");
-    Ok(())
+    let (conn, coord_id) = client.connect(via_addr, None).await
+        .map_err(|e| anyhow::anyhow!("coordinator connection failed: {}", e))?;
+
+    if !quiet {
+        eprintln!("connected to coordinator {}", coord_id);
+    }
+
+    let (mut send, mut recv) = conn.open_bi().await?;
+    
+    // request relay
+    let request = format!("RELAY {}\n", target);
+    send.write_all(request.as_bytes()).await?;
+    send.flush().await?;
+    
+    // check response
+    let mut response = String::new();
+    let mut reader = BufReader::new(&mut recv);
+    reader.read_line(&mut response).await?;
+    
+    if !response.starts_with("OK") {
+        anyhow::bail!("relay failed: {}", response.trim());
+    }
+    
+    if !quiet {
+        eprintln!("relay established to {}", target);
+    }
+    
+    pipe_bidirectional(conn).await
 }
 
 async fn handle_connection(
     incoming: quicnet::server::AuthenticatedIncoming,
-    verbose: u8,
+    echo: bool,
+    verbose: bool,
     quiet: bool,
 ) -> Result<()> {
     let remote = incoming.remote_address();
@@ -325,66 +249,140 @@ async fn handle_connection(
         eprintln!("[{}] connected from {}", peer_id, remote);
     }
 
-    let (mut send, recv) = conn.accept_bi().await?;
-    let mut reader = BufReader::new(recv);
-
-    // echo server
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {
-                if verbose > 1 {
-                    eprint!("[{}] < {}", peer_id, line);
-                }
-                send.write_all(line.as_bytes()).await?;
-                send.flush().await?;
-            }
-            Err(e) => {
-                if verbose > 0 {
-                    eprintln!("[{}] error: {}", peer_id, e);
-                }
-                break;
-            }
-        }
-    }
+    let result = if echo {
+        handle_echo(conn, peer_id, verbose).await
+    } else {
+        pipe_bidirectional(conn).await
+    };
 
     if !quiet {
         eprintln!("[{}] disconnected", peer_id);
+    }
+
+    result
+}
+
+async fn handle_echo(
+    conn: quinn::Connection,
+    peer_id: PeerId,
+    verbose: bool,
+) -> Result<()> {
+    let (mut send, recv) = conn.accept_bi().await?;
+    let mut reader = BufReader::new(recv);
+    let mut buf = Vec::new();
+
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        
+        if verbose {
+            eprintln!("[{}] {} bytes", peer_id, n);
+        }
+        
+        send.write_all(&buf).await?;
+        send.flush().await?;
     }
 
     conn.close(0u32.into(), b"");
     Ok(())
 }
 
-#[cfg(feature = "coordinator")]
-async fn run_coordinator(args: Args) -> Result<()> {
-    use quicnet::coordinator::Coordinator;
+async fn pipe_bidirectional(conn: quinn::Connection) -> Result<()> {
+    let (mut send, recv) = conn.open_bi().await?;
+
+    // recv -> stdout
+    let reader_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(recv);
+        let mut stdout = tokio::io::stdout();
+        let mut buf = vec![0u8; 8192];
+        
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if stdout.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                    if stdout.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // stdin -> send
+    let mut stdin = tokio::io::stdin();
+    let mut buf = vec![0u8; 8192];
     
-    let listen_addr = args.bind
-        .as_deref()
-        .unwrap_or("[::]")
-        .to_string();
-    
-    let port = args.port_flag.or(args.port).unwrap_or(quicnet::DEFAULT_PORT);
-    let addr: SocketAddr = format!("{}:{}", listen_addr, port).parse()?;
-    
-    let identity = load_identity(&args)?;
-    
-    if !args.quiet {
-        eprintln!("coordinator id: {}", identity.peer_id());
-        eprintln!("listening on {}", addr);
+    loop {
+        match stdin.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if send.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+                if send.flush().await.is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
     }
-    
-    let coordinator = Coordinator::new(addr, identity).await?;
-    coordinator.run().await
+
+    send.finish()?;
+    reader_task.abort();
+    conn.close(0u32.into(), b"");
+    Ok(())
+}
+
+fn parse_address(s: &str, default_port: u16) -> Result<SocketAddr> {
+    // handle [ipv6]:port
+    if s.starts_with('[') {
+        if let Some(end) = s.find(']') {
+            let host = &s[1..end];
+            let port = if s.len() > end + 1 && s.chars().nth(end + 1) == Some(':') {
+                s[end + 2..].parse()
+                    .map_err(|_| anyhow::anyhow!("invalid port: {}", &s[end + 2..]))?
+            } else {
+                default_port
+            };
+            let addr_str = format!("[{}]:{}", host, port);
+            return addr_str.parse()
+                .map_err(|_| anyhow::anyhow!("invalid address: {}", addr_str));
+        }
+    }
+
+    // try as-is first (for ipv6 without port)
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // try host:port
+    if let Some((host, port_str)) = s.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            let addr_str = format!("{}:{}", host, port);
+            return addr_str.to_socket_addrs()?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve: {}", host));
+        }
+    }
+
+    // add default port
+    let addr_str = format!("{}:{}", s, default_port);
+    addr_str.to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve: {}", s))
 }
 
 fn load_identity(args: &Args) -> Result<Identity> {
     if let Some(path) = &args.identity {
-        return Identity::from_file(path);
+        return Identity::from_file(path)
+            .map_err(|e| anyhow::anyhow!("cannot load identity {}: {}", path.display(), e));
     }
 
     if let Ok(identity) = Identity::from_ssh_key(None) {
@@ -396,16 +394,19 @@ fn load_identity(args: &Args) -> Result<Identity> {
 
 fn load_identity_with_hint(args: &Args, hint: &str) -> Result<Identity> {
     if let Some(path) = &args.identity {
-        return Identity::from_file(path);
+        return Identity::from_file(path)
+            .map_err(|e| anyhow::anyhow!("cannot load identity {}: {}", path.display(), e));
     }
 
-    let ssh_paths = vec![
-        dirs::home_dir().map(|h| h.join(".ssh").join(format!("id_ed25519_{}", hint))),
-        dirs::home_dir().map(|h| h.join(".ssh").join(format!("id_{}", hint))),
-        dirs::home_dir().map(|h| h.join(".ssh").join(hint)),
+    // try hint as path variations
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let paths = vec![
+        home.join(".ssh").join(format!("id_ed25519_{}", hint)),
+        home.join(".ssh").join(format!("id_{}", hint)),
+        home.join(".ssh").join(hint),
     ];
 
-    for path in ssh_paths.into_iter().flatten() {
+    for path in paths {
         if path.exists() {
             if let Ok(identity) = Identity::from_ssh_key(Some(&path)) {
                 return Ok(identity);
@@ -417,4 +418,28 @@ fn load_identity_with_hint(args: &Args, hint: &str) -> Result<Identity> {
     }
 
     load_identity(args)
+}
+
+#[cfg(feature = "coordinator")]
+async fn run_coordinator(args: Args) -> Result<()> {
+    use quicnet::coordinator::Coordinator;
+    
+    let port = args.port.unwrap_or(quicnet::DEFAULT_PORT);
+    let bind = args.bind.as_deref().unwrap_or("::");
+    
+    let addr: SocketAddr = if bind == "::" {
+        format!("[::]:{}", port).parse()
+    } else {
+        format!("{}:{}", bind, port).parse()
+    }.map_err(|_| anyhow::anyhow!("invalid bind address: {}:{}", bind, port))?;
+    
+    let identity = load_identity(&args)?;
+    
+    if !args.quiet {
+        eprintln!("coordinator id: {}", identity.peer_id().to_string());
+        eprintln!("listening on {}", addr);
+    }
+    
+    let coordinator = Coordinator::new(addr, identity).await?;
+    coordinator.run().await
 }
