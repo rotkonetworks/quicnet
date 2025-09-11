@@ -11,46 +11,13 @@ addresses and verify each other cryptographically.
 think of it as ssh meets netcat over quic - your identity is your keypair, not a
 domain name.
 
-## ⚠️ security warning
-
-**this is experimental software with known security limitations:**
-
-- **peer verification is currently broken** - the peer id extraction from
-certificates is not properly implemented in the current quinn 0.11 integration.
-the system falls back to using address-based hashing which completely bypasses
-cryptographic authentication.
-- **no actual peer identity verification** - while the code appears to verify
-peer certificates, the actual ed25519 public key extraction from quic handshakes
-is non-functional.
-- **irc bridge is incomplete** - messages are not properly routed between
-clients; it only echoes back to sender.
-- **openssh key parser is fragile** - uses hardcoded offsets that may fail with
-non-standard key formats.
-
-**do not use this for any security-critical applications.** this is a
-proof-of-concept that demonstrates the architecture but lacks proper
-cryptographic peer verification. the authentication system that is described in
-the documentation is not actually enforced due to implementation limitations.
-
-### known issues
-
-- `peer_id()` function returns fake ids based on connection address instead of
-certificate
-- client accepts any ed25519 certificate without verifying it matches expected
-peer
-- no protection against man-in-the-middle attacks in current state
-- irc mode can false-positive on regular text containing irc commands
-
-these issues will be addressed in future versions once proper certificate
-extraction is implemented for quinn 0.11.
-
 ## installation
 
 ```bash
 cargo install --path .
 
-# or with irc support
-cargo install --path . --features irc
+# or with coordinator support
+cargo install --path . --features coordinator
 ```
 
 ## quick start
@@ -78,14 +45,16 @@ quicnet 3n4hxrj7@192.168.1.100:4433
 quicnet -l
 
 # listen on specific port
-quicnet -l 6667
 quicnet -l -p 6667
 
 # bind to specific address
-quicnet -l -b 192.168.1.100 6667
+quicnet -l -b 192.168.1.100
 
 # use specific identity
 quicnet -l -i ~/.ssh/id_ed25519
+
+# echo mode for testing
+quicnet -l --echo
 ```
 
 ### client mode
@@ -93,15 +62,14 @@ quicnet -l -i ~/.ssh/id_ed25519
 ```bash
 # connect to host
 quicnet example.com
-quicnet example.com 6667
+quicnet example.com:6667
 
 # ssh-style with identity hint
 quicnet alice@example.com
 quicnet alice@192.168.1.100:6667
 
-# uri-style with port
-quicnet example.com:6667
-quicnet alice@example.com:6667
+# connect with peer id verification
+quicnet 3n4hxrj7@example.com:6667
 
 # ipv6
 quicnet 2001:db8::1
@@ -111,6 +79,9 @@ quicnet alice@[2001:db8::1]:6667
 
 # explicit identity
 quicnet -i ~/.ssh/id_ed25519 example.com
+
+# relay via coordinator
+quicnet --via coordinator.local target.local
 ```
 
 ### identity management
@@ -141,7 +112,7 @@ cat data.txt | quicnet server.local
 quicnet -l > output.txt
 
 # tunnel connection
-quicnet -l 8080 | nc localhost 80
+quicnet -l | nc localhost 80
 nc -l 8080 | quicnet remote:80
 ```
 
@@ -151,8 +122,8 @@ nc -l 8080 | quicnet remote:80
 
 every peer has an ed25519 keypair:
 - 32-byte public key becomes peer id
-- base32 encoded for text representation
-- self-signed certificates for quic
+- base58 encoded for text representation
+- self-signed certificates for quic transport
 
 ### transport
 
@@ -164,41 +135,44 @@ quic provides:
 
 ### authentication
 
-mutual authentication by default:
-- both peers present ed25519 certificates
-- peer ids extracted from certificates
-- no certificate authorities needed
+mutual ed25519 authentication over application layer:
+- quic handshake uses ephemeral certificates for transport security
+- application-layer challenge-response verifies ed25519 identities
+- both peers must prove possession of private keys
+- connections fail if peer identity doesn't match expectation
 
 ### wire format
 
-simple text protocol over bidirectional streams:
-- utf-8 encoded
-- newline delimited
-- optional irc protocol detection
+binary streams over quic:
+- authentication handshake on first stream
+- subsequent streams carry application data
+- supports stdin/stdout piping and custom protocols
 
 ## security
 
 ### protected
 
-- all data encrypted with chacha20-poly1305
+- all data encrypted with chacha20-poly1305 (quic/tls 1.3)
 - forward secrecy via ephemeral keys
-- authentication via ed25519
+- mutual authentication via ed25519 challenge-response
+- protection against replay attacks
 - no dns hijacking
 - no ca compromise
 
 ### visible
 
-- quic packet structure
-- connection timing/size
-- peer ids in handshake
+- quic packet structure and timing
+- connection metadata
+- peer ids are public
 - ip addresses
 
 ### trust model
 
-trust on first use (tofu):
-- first connection establishes peer id
-- subsequent connections verify same id
-- save known peers for persistence
+explicit peer verification:
+- peer ids can be specified in connection string
+- first connection establishes peer identity
+- subsequent connections verify same identity
+- manual verification via peer id comparison
 
 ## examples
 
@@ -206,11 +180,11 @@ trust on first use (tofu):
 
 ```bash
 # server
-quicnet -l 6667
+quicnet -l
 
-# clients
-quicnet alice@server.local:6667
-quicnet bob@server.local:6667
+# clients connect and type messages
+quicnet server.local
+quicnet bob@server.local
 ```
 
 ### file transfer
@@ -223,22 +197,25 @@ quicnet -l > received.tar.gz
 tar czf - /path/to/files | quicnet receiver.local
 ```
 
-### port forwarding
+### secure tunnel
 
 ```bash
-# on remote
-quicnet -l 8080 | nc localhost 80
+# on remote (expose local service)
+quicnet -l | nc localhost 80
 
-# on local
-nc -l 8080 | quicnet remote:8080
+# on local (connect to remote service)
+curl -x quicnet://remote.local http://localhost/
 ```
 
-### peer-to-peer
+### peer verification
 
 ```bash
-# both peers run
-quicnet -l 4433 &
-quicnet peer_id@other_host
+# server shows peer id on startup
+quicnet -l
+# peer id: 5KJvsngHvtMtyQcjhwAL6DDQw2X4LzyKQyl6CStBUuHCyaDhHV
+
+# client verifies specific peer
+quicnet 5KJvsngHvtMtyQcjhwAL6DDQw2X4LzyKQyl6CStBUuHCyaDhHV@server.local
 ```
 
 ## comparison
@@ -246,14 +223,20 @@ quicnet peer_id@other_host
 | feature | quicnet | ssh | telnet | netcat |
 |---------|---------|-----|--------|--------|
 | encryption | always | yes | no | no |
-| authentication | mutual* | server | no | no |
+| authentication | mutual | server | no | no |
 | identity | ed25519 | various | none | none |
 | transport | quic | tcp | tcp | tcp/udp |
 | dns required | no | optional | yes | optional |
 | ca required | no | optional | n/a | n/a |
 | shell | no | yes | yes | no |
+| multiplexing | yes | yes | no | no |
 
-*authentication currently broken - see security warning
+## limitations
+
+- openssh key parser uses simplified parsing that may not work with all key formats
+- no built-in peer discovery mechanism
+- coordinator relay functionality is basic
+- trust-on-first-use requires manual verification of peer ids
 
 ## license
 
