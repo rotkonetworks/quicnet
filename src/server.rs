@@ -1,4 +1,4 @@
-// quic server with proper authentication
+// quic server with identity-bound TLS
 use anyhow::Result;
 use quinn::{Endpoint, ServerConfig, Incoming, Connection};
 use std::net::SocketAddr;
@@ -13,23 +13,19 @@ pub struct Server {
 
 impl Server {
     pub fn bind(addr: SocketAddr, identity: Identity) -> Result<Self> {
-        // generate ephemeral cert for TLS layer
-        let cert = rcgen::generate_simple_self_signed(vec!["quicnet".to_string()])?;
-        let cert_chain = vec![cert.cert.der().clone()];
-        let key_der = cert.key_pair.serialize_der();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(key_der);
-        
+        let (cert_chain, key) = tls_cert_from_identity(&identity)?;
+
         let mut crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(cert_chain, key.into())?;
-        
+
         crypto.alpn_protocols = vec![b"quicnet/1".to_vec()];
         crypto.max_early_data_size = 0;
 
         let config = ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?
         ));
-        
+
         let endpoint = Endpoint::server(config, addr)?;
         Ok(Self { endpoint, identity })
     }
@@ -49,7 +45,7 @@ impl Server {
             identity: self.identity.clone(),
         })
     }
-    
+
     pub fn close(&self) {
         self.endpoint.close(0u32.into(), b"shutdown");
     }
@@ -66,8 +62,24 @@ impl AuthenticatedIncoming {
         let peer_id = auth::handshake_server(&conn, &self.identity).await?;
         Ok((conn, peer_id))
     }
-    
+
     pub fn remote_address(&self) -> SocketAddr {
         self.incoming.remote_address()
     }
+}
+
+fn tls_cert_from_identity(
+    identity: &Identity,
+) -> Result<(Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivatePkcs8KeyDer<'static>)> {
+    use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+
+    let pkcs8 = identity.pkcs8_der()?;
+    let pk = PrivatePkcs8KeyDer::from(pkcs8);
+    let kp = KeyPair::from_pkcs8_der_and_sign_algo(&pk, &PKCS_ED25519)?;
+
+    let params = CertificateParams::new(vec!["quicnet".to_string()])?;
+    let cert = params.self_signed(&kp)?;
+    let cert_der = CertificateDer::from(cert.der().to_vec());
+    Ok((vec![cert_der], pk))
 }

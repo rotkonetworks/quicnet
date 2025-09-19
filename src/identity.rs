@@ -23,21 +23,16 @@ impl PeerId {
         let decoded = bs58::decode(s)
             .into_vec()
             .map_err(|e| anyhow::anyhow!("invalid base58: {}", e))?;
-        
         if decoded.len() != 32 {
             anyhow::bail!("invalid peer id length: expected 32, got {}", decoded.len());
         }
-        
         let mut id = [0u8; 32];
         id.copy_from_slice(&decoded);
         Ok(Self(id))
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-    
-    // base58 is already shorter, so show more chars
+    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+
     pub fn short(&self) -> String {
         self.to_string().chars().take(12).collect()
     }
@@ -48,7 +43,6 @@ impl fmt::Display for PeerId {
         write!(f, "{}", self.short())
     }
 }
-
 impl fmt::Debug for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.short())
@@ -57,7 +51,7 @@ impl fmt::Debug for PeerId {
 
 #[derive(Clone)]
 pub struct Identity {
-    signing_key: SigningKey,
+    pub(crate) signing_key: SigningKey,
     peer_id: PeerId,
 }
 
@@ -99,7 +93,6 @@ impl Identity {
         };
 
         let contents = fs::read_to_string(&path)?;
-        
         if !contents.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
             anyhow::bail!("not an openssh private key");
         }
@@ -109,20 +102,18 @@ impl Identity {
             .skip(1)
             .take_while(|l| !l.starts_with("-----END"))
             .collect::<String>();
-        
+
         let decoded = base64::engine::general_purpose::STANDARD.decode(&b64)?;
-        
-        // simplified openssh parser for unencrypted ed25519 keys
+
+        // extremely simplified parser for unencrypted ed25519 OpenSSH keys
         const MAGIC: &[u8] = b"openssh-key-v1\0";
         if !decoded.starts_with(MAGIC) {
             anyhow::bail!("invalid openssh format");
         }
-        
-        // find ed25519 private key (hacky but works for standard keys)
+
         let marker = b"ssh-ed25519";
         let mut pos = MAGIC.len();
-        
-        // find second occurrence
+
         for _ in 0..2 {
             pos = decoded[pos..]
                 .windows(marker.len())
@@ -130,17 +121,16 @@ impl Identity {
                 .map(|p| pos + p + marker.len())
                 .ok_or_else(|| anyhow::anyhow!("not an ed25519 key"))?;
         }
-        
+
         // private key is ~36 bytes after second marker
         pos += 36;
-        
         if pos + 32 > decoded.len() {
             anyhow::bail!("key not found at expected offset");
         }
-        
+
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&decoded[pos..pos + 32]);
-        
+
         Self::from_bytes(&secret)
     }
 
@@ -148,7 +138,7 @@ impl Identity {
         let default_path = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("no home directory"))?
             .join(crate::DEFAULT_IDENTITY);
-        
+
         if default_path.exists() {
             Self::from_file(&default_path)
         } else {
@@ -166,26 +156,22 @@ impl Identity {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             use std::fs::OpenOptions;
             use std::io::Write;
-            
+            use std::os::unix::fs::OpenOptionsExt;
+
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
                 .mode(0o600)
                 .open(path)?;
-            
             file.write_all(&self.signing_key.to_bytes())?;
         }
-        
         #[cfg(not(unix))]
         fs::write(path, self.signing_key.to_bytes())?;
-        
         Ok(())
     }
 
@@ -195,5 +181,15 @@ impl Identity {
 
     pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
         self.signing_key.sign(msg).to_bytes()
+    }
+
+    /// PKCS#8 DER (for rcgen/rustls)
+    pub fn pkcs8_der(&self) -> Result<Vec<u8>> {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let doc = self
+            .signing_key
+            .to_pkcs8_der()
+            .map_err(|e| anyhow::anyhow!("pkcs8 encode: {e}"))?;
+        Ok(doc.as_bytes().to_vec())
     }
 }

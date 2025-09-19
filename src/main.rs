@@ -1,10 +1,10 @@
-// minimal p2p quic with proper authentication
+// minimal p2p quic with identity-bound TLS and application auth
 use anyhow::Result;
 use clap::Parser;
 use quicnet::{Client, Identity, PeerId, Server};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Parser)]
 #[command(name = "quicnet")]
@@ -31,7 +31,7 @@ struct Args {
     #[arg(short = 'b', long, value_name = "ADDR")]
     bind: Option<String>,
 
-    /// relay via coordinator
+    /// relay via coordinator (EXPERIMENTAL; not wired yet)
     #[arg(long, value_name = "HOST")]
     via: Option<String>,
 
@@ -48,7 +48,7 @@ struct Args {
     quiet: bool,
 
     #[cfg(feature = "coordinator")]
-    /// run as coordinator
+    /// run as coordinator (EXPERIMENTAL)
     #[arg(long)]
     coordinator: bool,
 }
@@ -103,7 +103,7 @@ fn print_usage_and_exit() -> ! {
 async fn run_server(args: Args) -> Result<()> {
     let port = args.port.unwrap_or(quicnet::DEFAULT_PORT);
     let bind = args.bind.as_deref().unwrap_or("::");
-    
+
     let addr: SocketAddr = if bind == "::" {
         format!("[::]:{}", port).parse()
     } else {
@@ -112,7 +112,7 @@ async fn run_server(args: Args) -> Result<()> {
 
     let identity = load_identity(&args)?;
     let peer_id = identity.peer_id().to_string();
-    
+
     let server = Server::bind(addr, identity)?;
     let actual_addr = server.local_addr()?;
 
@@ -128,7 +128,7 @@ async fn run_server(args: Args) -> Result<()> {
         let echo = args.echo;
         let verbose = args.verbose;
         let quiet = args.quiet;
-        
+
         tokio::spawn(async move {
             if let Err(e) = handle_connection(incoming, echo, verbose, quiet).await {
                 if verbose {
@@ -143,7 +143,7 @@ async fn run_server(args: Args) -> Result<()> {
 
 async fn run_client(args: Args) -> Result<()> {
     let target = args.target.clone().unwrap();
-    
+
     // parse target
     let (peer_hint, host_part) = if let Some((prefix, suffix)) = target.split_once('@') {
         (Some(prefix), suffix)
@@ -173,15 +173,13 @@ async fn run_client(args: Args) -> Result<()> {
 
     let client = Client::new(bind_addr, identity)?;
 
-    // handle relay
-    if let Some(via) = args.via {
-        let via_addr = parse_address(&via, quicnet::DEFAULT_PORT)?;
-        return run_relayed(client, via_addr, &target, args.quiet).await;
+    if args.via.is_some() {
+        eprintln!("--via is experimental and not wired yet; making direct connection");
     }
 
     // direct connection
     let expected_peer = peer_hint.and_then(|h| PeerId::from_str(h).ok());
-    
+
     if !args.quiet {
         eprintln!("connecting to {}", addr);
     }
@@ -193,47 +191,8 @@ async fn run_client(args: Args) -> Result<()> {
         eprintln!("connected to {} ({})", peer_id, conn.remote_address());
     }
 
-    pipe_bidirectional(conn).await
-}
-
-async fn run_relayed(
-    client: Client,
-    via_addr: SocketAddr,
-    target: &str,
-    quiet: bool,
-) -> Result<()> {
-    if !quiet {
-        eprintln!("connecting via {}", via_addr);
-    }
-
-    let (conn, coord_id) = client.connect(via_addr, None).await
-        .map_err(|e| anyhow::anyhow!("coordinator connection failed: {}", e))?;
-
-    if !quiet {
-        eprintln!("connected to coordinator {}", coord_id);
-    }
-
-    let (mut send, mut recv) = conn.open_bi().await?;
-    
-    // request relay
-    let request = format!("RELAY {}\n", target);
-    send.write_all(request.as_bytes()).await?;
-    send.flush().await?;
-    
-    // check response
-    let mut response = String::new();
-    let mut reader = BufReader::new(&mut recv);
-    reader.read_line(&mut response).await?;
-    
-    if !response.starts_with("OK") {
-        anyhow::bail!("relay failed: {}", response.trim());
-    }
-    
-    if !quiet {
-        eprintln!("relay established to {}", target);
-    }
-    
-    pipe_bidirectional(conn).await
+    // client is the initiator
+    pipe_bidirectional(conn, true).await
 }
 
 async fn handle_connection(
@@ -252,7 +211,8 @@ async fn handle_connection(
     let result = if echo {
         handle_echo(conn, peer_id, verbose).await
     } else {
-        pipe_bidirectional(conn).await
+        // server is responder (accepts the BI stream)
+        pipe_bidirectional(conn, false).await
     };
 
     if !quiet {
@@ -267,49 +227,53 @@ async fn handle_echo(
     peer_id: PeerId,
     verbose: bool,
 ) -> Result<()> {
-    let (mut send, recv) = conn.accept_bi().await?;
-    let mut reader = BufReader::new(recv);
-    let mut buf = Vec::new();
+    // accept a bi stream
+    let (mut send, mut recv) = conn.accept_bi().await?;
+    let mut buf = [0u8; 8192];
 
     loop {
-        buf.clear();
-        let n = reader.read_until(b'\n', &mut buf).await?;
-        if n == 0 {
-            break;
+        match recv.read(&mut buf).await {
+            Ok(Some(n)) => {
+                if verbose {
+                    eprintln!("[{}] {} bytes", peer_id, n);
+                }
+                send.write_all(&buf[..n]).await?;
+                send.flush().await?;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                if verbose {
+                    eprintln!("read error: {}", e);
+                }
+                break;
+            }
         }
-        
-        if verbose {
-            eprintln!("[{}] {} bytes", peer_id, n);
-        }
-        
-        send.write_all(&buf).await?;
-        send.flush().await?;
     }
 
+    send.finish()?;
     conn.close(0u32.into(), b"");
     Ok(())
 }
 
-async fn pipe_bidirectional(conn: quinn::Connection) -> Result<()> {
-    let (mut send, recv) = conn.open_bi().await?;
+async fn pipe_bidirectional(conn: quinn::Connection, initiator: bool) -> Result<()> {
+    // one bi-stream per connection: client opens, server accepts
+    let (mut send, mut recv) = if initiator {
+        conn.open_bi().await?
+    } else {
+        conn.accept_bi().await?
+    };
 
     // recv -> stdout
-    let reader_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(recv);
+    let recv_task = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
-        let mut buf = vec![0u8; 8192];
-        
+        let mut buf = [0u8; 64 * 1024];
         loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if stdout.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                    if stdout.flush().await.is_err() {
-                        break;
-                    }
+            match recv.read(&mut buf).await {
+                Ok(Some(n)) => {
+                    if stdout.write_all(&buf[..n]).await.is_err() { break; }
+                    if stdout.flush().await.is_err() { break; }
                 }
+                Ok(None) => break,
                 Err(_) => break,
             }
         }
@@ -317,25 +281,20 @@ async fn pipe_bidirectional(conn: quinn::Connection) -> Result<()> {
 
     // stdin -> send
     let mut stdin = tokio::io::stdin();
-    let mut buf = vec![0u8; 8192];
-    
+    let mut buf = [0u8; 64 * 1024];
     loop {
         match stdin.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                if send.write_all(&buf[..n]).await.is_err() {
-                    break;
-                }
-                if send.flush().await.is_err() {
-                    break;
-                }
+                if send.write_all(&buf[..n]).await.is_err() { break; }
+                if send.flush().await.is_err() { break; }
             }
             Err(_) => break,
         }
     }
 
     send.finish()?;
-    reader_task.abort();
+    let _ = recv_task.await;
     conn.close(0u32.into(), b"");
     Ok(())
 }
@@ -384,11 +343,9 @@ fn load_identity(args: &Args) -> Result<Identity> {
         return Identity::from_file(path)
             .map_err(|e| anyhow::anyhow!("cannot load identity {}: {}", path.display(), e));
     }
-
     if let Ok(identity) = Identity::from_ssh_key(None) {
         return Ok(identity);
     }
-
     Identity::load_or_generate()
 }
 
@@ -423,23 +380,24 @@ fn load_identity_with_hint(args: &Args, hint: &str) -> Result<Identity> {
 #[cfg(feature = "coordinator")]
 async fn run_coordinator(args: Args) -> Result<()> {
     use quicnet::coordinator::Coordinator;
-    
+
     let port = args.port.unwrap_or(quicnet::DEFAULT_PORT);
     let bind = args.bind.as_deref().unwrap_or("::");
-    
+
     let addr: SocketAddr = if bind == "::" {
         format!("[::]:{}", port).parse()
     } else {
         format!("{}:{}", bind, port).parse()
     }.map_err(|_| anyhow::anyhow!("invalid bind address: {}:{}", bind, port))?;
-    
+
     let identity = load_identity(&args)?;
-    
+
     if !args.quiet {
         eprintln!("coordinator id: {}", identity.peer_id().to_string());
         eprintln!("listening on {}", addr);
+        eprintln!("(experimental; --via not wired yet)");
     }
-    
+
     let coordinator = Coordinator::new(addr, identity).await?;
     coordinator.run().await
 }
