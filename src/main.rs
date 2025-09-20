@@ -1,7 +1,7 @@
 // minimal p2p quic with identity-bound TLS and application auth
 use anyhow::Result;
 use clap::Parser;
-use quicnet::{Client, Identity, PeerId, Server};
+use quicnet::{Client, Identity, PeerId, Server, manage};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,6 +42,10 @@ struct Args {
     /// suppress info messages
     #[arg(short = 'q', long)]
     quiet: bool,
+
+    /// manage peer authorizations
+    #[arg(long)]
+    authorize: bool,
 }
 
 #[tokio::main]
@@ -54,6 +58,8 @@ async fn main() -> Result<()> {
 
     if args.listen {
         run_server(args).await
+    }    else if args.authorize {
+        return manage::authorize_pending();
     } else if let Some(target) = args.target.clone() {
         run_client(args, &target).await
     } else {

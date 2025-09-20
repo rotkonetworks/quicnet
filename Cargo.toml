@@ -47,9 +47,11 @@ dirs = "5"
 # error handling
 anyhow = "1"
 
+# logging
+chrono = "0.4"
+
 [features]
 default = []
-coordinator = []
 
 [profile.release]
 lto = true
