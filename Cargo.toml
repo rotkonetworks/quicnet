@@ -46,6 +46,7 @@ dirs = "5"
 
 # error handling
 anyhow = "1"
+parking_lot = "0.12"
 
 # logging
 chrono = "0.4"
@@ -58,3 +59,11 @@ lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
+
+[[example]]
+name = "shell"
+path = "examples/shell.rs"
+
+[[example]]
+name = "chat"
+path = "examples/chat.rs"

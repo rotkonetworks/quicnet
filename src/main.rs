@@ -2,6 +2,7 @@
 use anyhow::Result;
 use clap::Parser;
 use quicnet::{Client, Identity, PeerId, Server, manage};
+use quicnet::known_hosts::{KnownHosts, Trust};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -114,6 +115,54 @@ async fn run_client(args: Args, target: &str) -> Result<()> {
     let expected_peer = peer_hint.and_then(|h| PeerId::from_str(h).ok());
     
     let (conn, peer_id) = client.connect(addr, expected_peer.as_ref()).await?;
+
+    // handle trust on first use
+    if expected_peer.is_none() {
+        let mut known_hosts = KnownHosts::load()?;
+        let host_str = host.to_string();
+        match known_hosts.check(&host_str, args.port, &peer_id) {
+            Trust::Known => {
+                // silent success
+            }
+            Trust::Unknown => {
+                if !args.quiet {
+                    eprintln!("new peer: {} ({})", peer_id.short(), addr);
+                    eprintln!("to pin: {}@{}", peer_id, host);
+                }
+                known_hosts.add(&host_str, args.port, peer_id)?;
+            }
+            Trust::Different(previous) => {
+                eprintln!("\nwarning: {} has different identity", host);
+                eprintln!("  current: {}", peer_id.short());
+                eprintln!("  previous: {}", previous.short());
+                eprintln!("");
+                eprintln!("options:");
+                eprintln!("  [1] continue (accept new key)");
+                eprintln!("  [2] abort");
+                eprintln!("");
+                eprintln!("tip: use {}@{} to pin identity", peer_id, host);
+                eprint!("choice [1]: ");
+                
+                use std::io::{self, BufRead};
+                let stdin = io::stdin();
+                let mut line = String::new();
+                stdin.lock().read_line(&mut line)?;
+                
+                match line.trim() {
+                    "" | "1" => {
+                        known_hosts.add(&host_str, args.port, peer_id)?;
+                        if !args.quiet {
+                            eprintln!("accepted new identity");
+                        }
+                    }
+                    _ => {
+                        conn.close(0u32.into(), b"user rejected");
+                        anyhow::bail!("connection aborted by user");
+                    }
+                }
+            }
+        }
+    }
     
     if !args.quiet {
         eprintln!("connected to {} ({})", peer_id, conn.remote_address());
@@ -130,6 +179,23 @@ async fn handle_connection(
 ) -> Result<()> {
     let remote = incoming.remote_address();
     let (conn, peer_id) = incoming.accept().await?;
+
+    // check authorization
+    use quicnet::authorized_peers::AuthorizedPeers;
+    use quicnet::pending_peers::PendingPeers;
+    let authorized = AuthorizedPeers::load()?;
+    if !authorized.is_authorized(&peer_id) {
+        let pending = PendingPeers::new()?;
+        pending.log(&peer_id, &remote.to_string())?;
+        
+        if !quiet {
+            eprintln!("[{}] unauthorized (logged for review)", peer_id.short());
+            eprintln!("  run: quicnet --authorize");
+        }
+        
+        conn.close(0u32.into(), b"unauthorized");
+        return Ok(());  // not an error, just policy
+    }
 
     if !quiet {
         eprintln!("[{}] connected from {}", peer_id, remote);

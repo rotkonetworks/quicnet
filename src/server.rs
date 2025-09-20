@@ -5,10 +5,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use crate::identity::{Identity, PeerId};
 use crate::auth;
+use crate::security::{RateLimiter, AuditLog};
 
 pub struct Server {
     endpoint: Endpoint,
     identity: Identity,
+    pub(crate) rate_limiter: Option<RateLimiter>,
+    pub(crate) audit_log: AuditLog,
+    pub(crate) authorized_peers_file: Option<String>,
 }
 
 impl Server {
@@ -27,7 +31,13 @@ impl Server {
         ));
 
         let endpoint = Endpoint::server(config, addr)?;
-        Ok(Self { endpoint, identity })
+        Ok(Self { 
+            endpoint, 
+            identity,
+            rate_limiter: None,
+            audit_log: AuditLog::disabled(),
+            authorized_peers_file: None,
+        })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -44,6 +54,12 @@ impl Server {
             incoming,
             identity: self.identity.clone(),
         })
+    }
+    
+    pub async fn accept_authenticated(&self) -> Option<crate::transport::AuthenticatedStream> {
+        let incoming = self.accept().await?;
+        let (conn, peer_id) = incoming.accept().await.ok()?;
+        crate::transport::AuthenticatedStream::server(conn, peer_id).await.ok()
     }
 
     pub fn close(&self) {

@@ -1,4 +1,4 @@
-// trust-on-first-use store for peer identities
+// trust store with better UX than SSH
 use std::io::Write;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use crate::PeerId;
 
 pub struct KnownHosts {
     path: PathBuf,
-    hosts: HashMap<String, PeerId>,
+    hosts: HashMap<String, Vec<PeerId>>,  // multiple keys per host allowed
 }
 
 impl KnownHosts {
@@ -29,17 +29,19 @@ impl KnownHosts {
     pub fn check(&self, host: &str, port: u16, peer_id: &PeerId) -> Trust {
         let key = format!("{}:{}", host, port);
         match self.hosts.get(&key) {
-            Some(known) if known == peer_id => Trust::Known,
-            Some(known) => Trust::Changed(*known),
-            None => Trust::Unknown,
+            Some(known_ids) if known_ids.contains(peer_id) => Trust::Known,
+            Some(known_ids) if !known_ids.is_empty() => Trust::Different(known_ids[0]),
+            _ => Trust::Unknown,
         }
     }
     
     pub fn add(&mut self, host: &str, port: u16, peer_id: PeerId) -> Result<()> {
         let key = format!("{}:{}", host, port);
-        self.hosts.insert(key.clone(), peer_id);
+        self.hosts.entry(key.clone())
+            .or_insert_with(Vec::new)
+            .push(peer_id);
         
-        // append to file
+        // append to file (allows multiple keys per host)
         let line = format!("{} {}\n", key, peer_id);
         fs::create_dir_all(self.path.parent().unwrap())?;
         fs::OpenOptions::new()
@@ -50,13 +52,15 @@ impl KnownHosts {
         Ok(())
     }
     
-    fn parse_file(path: &PathBuf) -> Result<HashMap<String, PeerId>> {
-        let mut hosts = HashMap::new();
+    fn parse_file(path: &PathBuf) -> Result<HashMap<String, Vec<PeerId>>> {
+        let mut hosts: HashMap<String, Vec<PeerId>> = HashMap::new();
         for line in fs::read_to_string(path)?.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() == 2 {
                 if let Ok(peer_id) = PeerId::from_str(parts[1]) {
-                    hosts.insert(parts[0].to_string(), peer_id);
+                    hosts.entry(parts[0].to_string())
+                        .or_insert_with(Vec::new)
+                        .push(peer_id);
                 }
             }
         }
@@ -66,6 +70,6 @@ impl KnownHosts {
 
 pub enum Trust {
     Known,
-    Unknown,
-    Changed(PeerId),
+    Unknown,  
+    Different(PeerId),  // not "Changed" - less scary
 }
