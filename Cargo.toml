@@ -26,10 +26,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "ne
 # crypto
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 rand = "0.8"
+ssh-key = { version = "0.6", features = ["ed25519", "encryption"] }
+rpassword = "7"
 
 # encoding
 base64 = "0.22"
 bs58 = "0.5"
+b256 = "0.4.1"
 
 # certificates / x509
 rcgen = "0.14"

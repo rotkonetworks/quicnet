@@ -5,7 +5,7 @@ use rand::rngs::OsRng;
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use base64::Engine;
+use b256::Base256;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 32]);
@@ -16,36 +16,44 @@ impl PeerId {
     }
 
     pub fn to_string(&self) -> String {
-        bs58::encode(&self.0).into_string()
+        let encoded = Base256::encode(&self.0);
+        encoded.iter().collect()
     }
 
     pub fn from_str(s: &str) -> Result<Self> {
-        let decoded = bs58::decode(s)
-            .into_vec()
-            .map_err(|e| anyhow::anyhow!("invalid base58: {}", e))?;
-        if decoded.len() != 32 {
-            anyhow::bail!("invalid peer id length: expected 32, got {}", decoded.len());
+        // try b256 first
+        if s.len() == 32 {
+            let chars: Vec<char> = s.chars().collect();
+            let mut char_array = ['\0'; 32];
+            char_array.copy_from_slice(&chars);
+            if let Some(bytes) = Base256::decode(&char_array) {
+                return Ok(Self(bytes));
+            }
         }
-        let mut id = [0u8; 32];
-        id.copy_from_slice(&decoded);
-        Ok(Self(id))
+        // try hex
+        if s.len() == 64 {
+            let hex_bytes = s.as_bytes();
+            let mut hex_array = [0u8; 64];
+            hex_array.copy_from_slice(&hex_bytes[..64]);
+            if let Some(bytes) = Base256::hex_to_bytes(&hex_array) {
+                return Ok(Self(bytes));
+            }
+        }
+        anyhow::bail!("invalid peer id: expected 32 b256 chars or 64 hex chars")
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
-
-    pub fn short(&self) -> String {
-        self.to_string().chars().take(12).collect()
-    }
+    pub fn short(&self) -> String { self.to_string().chars().take(8).collect() }
 }
 
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.short())
+        write!(f, "{}", self.to_string())
     }
 }
 impl fmt::Debug for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.short())
+        write!(f, "{}", self.to_string())
     }
 }
 
@@ -85,6 +93,8 @@ impl Identity {
     }
 
     pub fn from_ssh_key(path: Option<&Path>) -> Result<Self> {
+        use ssh_key::PrivateKey;
+
         let path = match path {
             Some(p) => p.to_path_buf(),
             None => dirs::home_dir()
@@ -92,46 +102,26 @@ impl Identity {
                 .join(".ssh/id_ed25519"),
         };
 
+        // read the key - handles both encrypted and unencrypted
         let contents = fs::read_to_string(&path)?;
-        if !contents.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
-            anyhow::bail!("not an openssh private key");
+        let private_key = PrivateKey::from_openssh(&contents)?;
+
+        let private_key = if private_key.is_encrypted() {
+            // prompt for passphrase
+            let passphrase = rpassword::prompt_password("Enter passphrase: ")?;
+            private_key.decrypt(&passphrase)?
+        } else {
+            private_key
+        };
+
+        // extract ed25519 key material
+        match private_key.key_data() {
+            ssh_key::private::KeypairData::Ed25519(keypair) => {
+                let secret = keypair.private.to_bytes();
+                Self::from_bytes(&secret)
+            }
+            _ => anyhow::bail!("not an ed25519 key"),
         }
-
-        let b64 = contents
-            .lines()
-            .skip(1)
-            .take_while(|l| !l.starts_with("-----END"))
-            .collect::<String>();
-
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&b64)?;
-
-        // extremely simplified parser for unencrypted ed25519 OpenSSH keys
-        const MAGIC: &[u8] = b"openssh-key-v1\0";
-        if !decoded.starts_with(MAGIC) {
-            anyhow::bail!("invalid openssh format");
-        }
-
-        let marker = b"ssh-ed25519";
-        let mut pos = MAGIC.len();
-
-        for _ in 0..2 {
-            pos = decoded[pos..]
-                .windows(marker.len())
-                .position(|w| w == marker)
-                .map(|p| pos + p + marker.len())
-                .ok_or_else(|| anyhow::anyhow!("not an ed25519 key"))?;
-        }
-
-        // private key is ~36 bytes after second marker
-        pos += 36;
-        if pos + 32 > decoded.len() {
-            anyhow::bail!("key not found at expected offset");
-        }
-
-        let mut secret = [0u8; 32];
-        secret.copy_from_slice(&decoded[pos..pos + 32]);
-
-        Self::from_bytes(&secret)
     }
 
     pub fn load_or_generate() -> Result<Self> {
