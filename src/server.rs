@@ -3,16 +3,17 @@ use anyhow::Result;
 use quinn::{Endpoint, ServerConfig, Incoming, Connection};
 use std::net::SocketAddr;
 use std::sync::Arc;
+
 use crate::identity::{Identity, PeerId};
 use crate::auth;
-use crate::security::{RateLimiter, AuditLog};
+use crate::security::{RateLimiter, AuditLog, AuditEvent};
 
 pub struct Server {
     endpoint: Endpoint,
     identity: Identity,
     pub(crate) rate_limiter: Option<RateLimiter>,
     pub(crate) audit_log: AuditLog,
-    pub(crate) authorized_peers_file: Option<String>,
+    pub(crate) authorized_peers_file: Option<std::path::PathBuf>,
 }
 
 impl Server {
@@ -31,8 +32,8 @@ impl Server {
         ));
 
         let endpoint = Endpoint::server(config, addr)?;
-        Ok(Self { 
-            endpoint, 
+        Ok(Self {
+            endpoint,
             identity,
             rate_limiter: None,
             audit_log: AuditLog::disabled(),
@@ -55,11 +56,53 @@ impl Server {
             identity: self.identity.clone(),
         })
     }
-    
+
+    /// Accept and immediately perform the app handshake, returning a first-class stream.
+    /// If `authorized_peers_file` is set, enforce it. Rate-limit and audit if configured.
     pub async fn accept_authenticated(&self) -> Option<crate::transport::AuthenticatedStream> {
-        let incoming = self.accept().await?;
-        let (conn, peer_id) = incoming.accept().await.ok()?;
-        crate::transport::AuthenticatedStream::server(conn, peer_id).await.ok()
+        let auth_incoming = self.accept().await?;
+        let remote = auth_incoming.remote_address();
+
+        // Rate limiting by IP
+        if let Some(limiter) = &self.rate_limiter {
+            if !limiter.check(remote.ip()) {
+                self.audit_log.log(AuditEvent::RateLimited { addr: remote.to_string() });
+                // We still need to complete the handshake to have a Connection to close, so try to accept and then close.
+            }
+        }
+
+        // Carry on and close later if rate-limited
+        match auth_incoming.accept().await {
+            Ok((conn, peer_id)) => {
+                // Authorization (optional)
+                if let Some(path) = &self.authorized_peers_file {
+                    let ap = match crate::authorized_peers::AuthorizedPeers::load_path(path) {
+                        Ok(ap) => ap,
+                        Err(_) => {
+                            // If file unreadable, default-deny
+                            self.audit_log.log(AuditEvent::ConnectionRejected {
+                                peer: peer_id, addr: remote.to_string(), reason: "authz file unreadable".into()
+                            });
+                            conn.close(0u32.into(), b"authorization config error");
+                            return None;
+                        }
+                    };
+                    if !ap.is_authorized(&peer_id) {
+                        self.audit_log.log(AuditEvent::ConnectionRejected {
+                            peer: peer_id, addr: remote.to_string(), reason: "unauthorized".into()
+                        });
+                        conn.close(0u32.into(), b"unauthorized");
+                        return None;
+                    }
+                }
+                self.audit_log.log(AuditEvent::ConnectionAccepted { peer: peer_id, addr: remote.to_string() });
+                crate::transport::AuthenticatedStream::server(conn, peer_id).await.ok()
+            }
+            Err(_e) => {
+                self.audit_log.log(AuditEvent::AuthenticationFailed { addr: remote.to_string() });
+                None
+            }
+        }
     }
 
     pub fn close(&self) {

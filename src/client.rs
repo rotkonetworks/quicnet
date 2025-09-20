@@ -76,7 +76,7 @@ fn tls_cert_from_identity(
     let kp = KeyPair::from_pkcs8_der_and_sign_algo(&pk, &PKCS_ED25519)?;
 
     let params = CertificateParams::new(vec!["quicnet".to_string()])?;
-    // SubjectAltName “quicnet” is fine; we verify SPKI not DNS.
+    // SAN is irrelevant; we verify SPKI, not DNS.
     let cert = params.self_signed(&kp)?;
     let cert_der = CertificateDer::from(cert.der().to_vec());
     Ok((vec![cert_der], pk))
@@ -99,32 +99,22 @@ impl rustls::client::danger::ServerCertVerifier for PeerIdVerifier {
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         if let Some(expected) = self.expected {
-            // parse x509 and extract Ed25519 SPKI
             use x509_parser::prelude::FromDer;
             let (_, cert) = x509_parser::certificate::X509Certificate::from_der(end_entity.as_ref())
                 .map_err(|_| rustls::Error::General("x509 parse error".into()))?;
             let spki = &cert.tbs_certificate.subject_pki;
-            // 1.3.101.112 is Ed25519
+            // 1.3.101.112 = Ed25519
             let oid_ed25519 = x509_parser::oid_registry::OID_SIG_ED25519;
             if spki.algorithm.algorithm != oid_ed25519 {
-                return Err(rustls::Error::General(
-                    "server cert not Ed25519".into(),
-                ));
+                return Err(rustls::Error::General("server cert not Ed25519".into()));
             }
-            let pk_bits = spki
-                .subject_public_key
-                .data
-                .to_owned(); // raw 32 bytes
+            let pk_bits = spki.subject_public_key.data.to_owned();
             if pk_bits.as_ref() != expected.as_bytes() {
                 return Err(rustls::Error::General(
                     "peer id mismatch (SPKI != expected)".into(),
                 ));
             }
-        } else {
-            // No expected peer: allow, but this is TOFU territory.
-            // (Would be better to store mapping; out of scope for now.)
         }
-
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 
