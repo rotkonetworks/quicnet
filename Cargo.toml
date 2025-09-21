@@ -1,6 +1,6 @@
 [package]
 name = "quicnet"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["rotko networks"]
 license = "MIT OR Apache-2.0"
@@ -51,8 +51,20 @@ parking_lot = "0.12"
 # logging
 chrono = "0.4"
 
+# webtransport deps (optional feature)
+h3 = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
+h3-quinn = { git = "https://github.com/hyperium/h3", rev = "0e54a16", features = ["datagram"], optional = true }
+h3-webtransport = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
+h3-datagram = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
+bytes = { version = "1", optional = true }
+http = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+
+
 [features]
 default = []
+webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "hex"]
 
 [profile.release]
 lto = true
@@ -67,3 +79,13 @@ path = "examples/shell.rs"
 [[example]]
 name = "chat"
 path = "examples/chat.rs"
+
+[[example]]
+name = "webtransport_chat"
+path = "examples/webtransport_chat.rs"
+
+[dependencies.instant-acme]
+version = "0.7"
+
+[dependencies.rustls-pemfile]
+version = "2"

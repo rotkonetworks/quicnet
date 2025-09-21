@@ -1,4 +1,4 @@
-// ed25519 identity management
+// src/identity.rs
 use anyhow::Result;
 use ed25519_dalek::{SigningKey, Signer};
 use rand::rngs::OsRng;
@@ -83,38 +83,33 @@ impl Identity {
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
+        // try openssh format first
+        if let Ok(contents) = fs::read_to_string(path) {
+            if contents.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
+                return Self::from_openssh_string(&contents);
+            }
+        }
+        // fall back to raw 32 bytes
         let bytes = fs::read(path)?;
         if bytes.len() != 32 {
-            anyhow::bail!("key file must be exactly 32 bytes");
+            anyhow::bail!("key file must be exactly 32 bytes or openssh format");
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&bytes);
         Self::from_bytes(&secret)
     }
 
-    pub fn from_ssh_key(path: Option<&Path>) -> Result<Self> {
+    fn from_openssh_string(contents: &str) -> Result<Self> {
         use ssh_key::PrivateKey;
-
-        let path = match path {
-            Some(p) => p.to_path_buf(),
-            None => dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("no home directory"))?
-                .join(".ssh/id_ed25519"),
-        };
-
-        // read the key - handles both encrypted and unencrypted
-        let contents = fs::read_to_string(&path)?;
-        let private_key = PrivateKey::from_openssh(&contents)?;
-
+        
+        let private_key = PrivateKey::from_openssh(contents)?;
         let private_key = if private_key.is_encrypted() {
-            // prompt for passphrase
             let passphrase = rpassword::prompt_password("Enter passphrase: ")?;
             private_key.decrypt(&passphrase)?
         } else {
             private_key
         };
-
-        // extract ed25519 key material
+        
         match private_key.key_data() {
             ssh_key::private::KeypairData::Ed25519(keypair) => {
                 let secret = keypair.private.to_bytes();
@@ -122,6 +117,16 @@ impl Identity {
             }
             _ => anyhow::bail!("not an ed25519 key"),
         }
+    }
+
+    pub fn from_ssh_key(path: Option<&Path>) -> Result<Self> {
+        let path = match path {
+            Some(p) => p.to_path_buf(),
+            None => dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("no home directory"))?
+                .join(".ssh/id_ed25519"),
+        };
+        Self::from_file(&path)
     }
 
     pub fn load_or_generate() -> Result<Self> {
@@ -136,13 +141,18 @@ impl Identity {
             if let Some(parent) = default_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            identity.save(&default_path)?;
+            identity.save_openssh(&default_path)?;
             eprintln!("generated new identity: {}", default_path.display());
             Ok(identity)
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        // deprecated in favor of save_openssh
+        self.save_raw(path)
+    }
+
+    pub fn save_raw(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -162,6 +172,76 @@ impl Identity {
         }
         #[cfg(not(unix))]
         fs::write(path, self.signing_key.to_bytes())?;
+        Ok(())
+    }
+
+    pub fn save_openssh(&self, path: &Path) -> Result<()> {
+        use ssh_key::{PrivateKey, PublicKey, private::Ed25519Keypair};
+        use ssh_key::private::Ed25519PrivateKey;
+        use ssh_key::public::Ed25519PublicKey;
+        
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        
+        // save private key
+        let private = Ed25519PrivateKey::from(&self.signing_key);
+        let public = self.signing_key.verifying_key();
+        
+        let keypair = Ed25519Keypair {
+            private,
+            public: public.into(),
+        };
+        
+        let private_key = PrivateKey::from(keypair);
+        let openssh_string = private_key.to_openssh(ssh_key::LineEnding::LF)?;
+        
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(openssh_string.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        fs::write(path, openssh_string.as_bytes())?;
+        
+        // save public key with .pub extension
+        let pub_path = path.with_extension("pub");
+        let public_bytes = self.signing_key.verifying_key();
+        let ed25519_public = Ed25519PublicKey::from(&public_bytes);
+        let public_key = PublicKey::from(ed25519_public);
+        
+        // format: ssh-ed25519 BASE64 PEER_ID_B256
+        let mut pub_string = public_key.to_openssh()?;
+        pub_string.push(' ');
+        pub_string.push_str(&self.peer_id.to_string());
+        pub_string.push('\n');
+        
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o644)  // public key can be world-readable
+                .open(&pub_path)?;
+            file.write_all(pub_string.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        fs::write(&pub_path, pub_string.as_bytes())?;
+        
         Ok(())
     }
 

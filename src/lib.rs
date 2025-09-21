@@ -15,7 +15,7 @@ pub use authorized_peers::AuthorizedPeers;
 pub use pending_peers::PendingPeers;
 
 pub const DEFAULT_PORT: u16 = 4433;
-pub const DEFAULT_IDENTITY: &str = ".quicnet/identity";
+pub const DEFAULT_IDENTITY: &str = ".quicnet/id_ed25519";
 
 pub mod transport;
 pub mod security;
