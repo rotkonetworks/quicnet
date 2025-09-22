@@ -20,12 +20,7 @@ pub struct WebCompatServer {
 #[cfg(feature = "webtransport")]
 impl WebCompatServer {
     pub async fn new(addr: SocketAddr, identity: Identity) -> Result<Self> {
-        let (cert_chain, key) = generate_self_signed_cert(&identity)?;
-
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(&cert_chain[0]);
-        let cert_hash = hex::encode(hasher.finalize());
+        let (cert_chain, key, cert_hash) = generate_self_signed_cert()?;
 
         let mut crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -40,6 +35,7 @@ impl WebCompatServer {
 
         let mut transport_config = h3_quinn::quinn::TransportConfig::default();
         transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+        transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?));
         server_config.transport = Arc::new(transport_config);
 
         let endpoint = h3_quinn::quinn::Endpoint::server(server_config, addr)?;
@@ -108,26 +104,49 @@ impl WebCompatServer {
 }
 
 #[cfg(feature = "webtransport")]
-fn generate_self_signed_cert(
-    identity: &Identity,
-) -> Result<(Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>)> {
-    use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
+fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>, String)> {
+    use rcgen::{CertificateParams, KeyPair, CustomExtension};
+    use sha2::{Sha256, Digest};
 
-    let pkcs8_vec = identity.pkcs8_der()?;
-    let pkcs8_der = PrivatePkcs8KeyDer::from(pkcs8_vec.as_slice());
-    let kp = KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8_der, &PKCS_ED25519)?;
+    // generate ECDSA P-256 key for WebTransport compatibility
+    let kp = KeyPair::generate()?;
+    let key_der_bytes = kp.serialized_der().to_vec();
 
     let mut params = CertificateParams::new(vec![])?;
-    params.not_before = rcgen::date_time_ymd(2025, 1, 1);
-    params.not_after = rcgen::date_time_ymd(2025, 1, 14);
+    
+    // certificate valid from 2024 to 2026
+    params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2026, 1, 1);
+
+    // add subject alt names
+    params.subject_alt_names = vec![
+        rcgen::SanType::DnsName("localhost".try_into()?),
+    ];
+
+    // add custom extension for WebTransport (OID 1.3.6.1.4.1.57123.1)
+    // this OID signals the cert is for WebTransport
+    let webtransport_oid = vec![1, 3, 6, 1, 4, 1, 0x83, 0xdb, 0x63, 1];
+    params.custom_extensions = vec![
+        CustomExtension::from_oid_content(
+            &webtransport_oid,
+            vec![0x05, 0x00], // ASN.1 NULL
+        )
+    ];
 
     let cert = params.self_signed(&kp)?;
-    let cert_der = CertificateDer::from(cert.der().to_vec());
+    let cert_der = cert.der().to_vec();
+    
+    // hash the entire certificate DER
+    let mut hasher = Sha256::new();
+    hasher.update(&cert_der);
+    let cert_hash = hex::encode(hasher.finalize());
+    
+    let cert_der = CertificateDer::from(cert_der);
     let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        PrivatePkcs8KeyDer::from(pkcs8_vec)
+        PrivatePkcs8KeyDer::from(key_der_bytes)
     );
 
-    Ok((vec![cert_der], key_der))
+    Ok((vec![cert_der], key_der, cert_hash))
 }
 
 // stub for when feature is disabled
