@@ -1,8 +1,8 @@
 // minimal p2p quic with identity-bound TLS and application auth
 use anyhow::Result;
 use clap::Parser;
-use quicnet::{Peer, Identity, PeerId, manage};
 use quicnet::known_hosts::{KnownHosts, Trust};
+use quicnet::{Identity, Peer, PeerId, manage};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -207,11 +207,7 @@ async fn handle_connection(
     result
 }
 
-async fn handle_echo(
-    conn: quinn::Connection,
-    peer_id: PeerId,
-    verbose: bool,
-) -> Result<()> {
+async fn handle_echo(conn: quinn::Connection, peer_id: PeerId, verbose: bool) -> Result<()> {
     let (mut send, mut recv) = conn.accept_bi().await?;
     let mut buf = [0u8; 8192];
 
@@ -252,8 +248,12 @@ async fn pipe_bidirectional(conn: quinn::Connection, initiator: bool) -> Result<
         loop {
             match recv.read(&mut buf).await {
                 Ok(Some(n)) => {
-                    if stdout.write_all(&buf[..n]).await.is_err() { break; }
-                    if stdout.flush().await.is_err() { break; }
+                    if stdout.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                    if stdout.flush().await.is_err() {
+                        break;
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => break,
@@ -267,8 +267,12 @@ async fn pipe_bidirectional(conn: quinn::Connection, initiator: bool) -> Result<
         match stdin.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                if send.write_all(&buf[..n]).await.is_err() { break; }
-                if send.flush().await.is_err() { break; }
+                if send.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+                if send.flush().await.is_err() {
+                    break;
+                }
             }
             Err(_) => break,
         }

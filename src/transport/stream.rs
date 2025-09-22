@@ -1,11 +1,11 @@
 // authenticated stream abstraction over quinn
-use anyhow::Result;
-use quinn::{Connection, SendStream, RecvStream};
 use crate::PeerId;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use anyhow::Result;
+use quinn::{Connection, RecvStream, SendStream};
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::io;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub struct AuthenticatedStream {
     conn: Connection,
@@ -17,26 +17,36 @@ pub struct AuthenticatedStream {
 impl AuthenticatedStream {
     pub async fn client(conn: Connection, peer_id: PeerId) -> Result<Self> {
         let (send, recv) = conn.open_bi().await?;
-        Ok(Self { conn, send, recv, peer_id })
+        Ok(Self {
+            conn,
+            send,
+            recv,
+            peer_id,
+        })
     }
-    
+
     pub async fn server(conn: Connection, peer_id: PeerId) -> Result<Self> {
         let (send, recv) = conn.accept_bi().await?;
-        Ok(Self { conn, send, recv, peer_id })
+        Ok(Self {
+            conn,
+            send,
+            recv,
+            peer_id,
+        })
     }
-    
+
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
     }
-    
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
-    
+
     pub fn remote_address(&self) -> std::net::SocketAddr {
         self.conn.remote_address()
     }
-    
+
     pub fn split(self) -> (SendStream, RecvStream) {
         (self.send, self.recv)
     }

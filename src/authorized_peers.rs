@@ -1,12 +1,12 @@
 // access control list for incoming connections
+use crate::PeerId;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use crate::PeerId;
 
 pub struct AuthorizedPeers {
-    peers: Option<HashSet<PeerId>>,  // None = allow all
+    peers: Option<HashSet<PeerId>>, // None = allow all
 }
 
 impl AuthorizedPeers {

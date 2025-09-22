@@ -1,19 +1,19 @@
 // management utilities for peer authorization
-use std::path::Path;
+use crate::{PeerId, pending_peers::PendingPeers};
+use anyhow::Result;
 use std::fs;
 use std::io::Write;
-use anyhow::Result;
-use crate::{PeerId, pending_peers::PendingPeers};
+use std::path::Path;
 
 pub fn authorize_pending() -> Result<()> {
     let pending = PendingPeers::new()?;
-    let recent = pending.list_recent(24)?;  // last 24 hours
-    
+    let recent = pending.list_recent(24)?; // last 24 hours
+
     if recent.is_empty() {
         eprintln!("no pending peers in last 24 hours");
         return Ok(());
     }
-    
+
     eprintln!("Recent unauthorized connection attempts:");
     eprintln!();
     for (i, (peer_id, addr, _)) in recent.iter().enumerate() {
@@ -21,15 +21,13 @@ pub fn authorize_pending() -> Result<()> {
     }
     eprintln!();
     eprint!("Authorize which peers? (1,2,3 or all or none): ");
-    
+
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let input = input.trim();
-    
-    let authorized_path = dirs::home_dir()
-        .unwrap()
-        .join(".quicnet/authorized_peers");
-    
+
+    let authorized_path = dirs::home_dir().unwrap().join(".quicnet/authorized_peers");
+
     if input == "all" {
         for (peer_id, _, _) in recent {
             append_authorized(&authorized_path, &peer_id)?;

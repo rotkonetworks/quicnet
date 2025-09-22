@@ -1,9 +1,9 @@
 // builder pattern for peer configuration
+use crate::security::{AuditLog, RateLimiter};
+use crate::{Identity, Peer};
 use anyhow::Result;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
-use crate::{Identity, Peer};
-use crate::security::{RateLimiter, AuditLog};
 
 pub struct ServerBuilder {
     identity: Option<Identity>,
@@ -50,7 +50,9 @@ impl ServerBuilder {
     }
 
     pub fn build(self) -> Result<Peer> {
-        let identity = self.identity.ok_or_else(|| anyhow::anyhow!("identity required"))?;
+        let identity = self
+            .identity
+            .ok_or_else(|| anyhow::anyhow!("identity required"))?;
         let bind_addr = parse_socket_addr(self.bind_addr_str.as_deref().unwrap_or("[::]:4433"))?;
         let mut peer = Peer::new(bind_addr, identity)?;
         peer.rate_limiter = self.rate_limiter;
@@ -84,7 +86,9 @@ impl ClientBuilder {
     }
 
     pub async fn connect<A: Into<SocketAddr>>(self, _addr: A) -> Result<Peer> {
-        let identity = self.identity.ok_or_else(|| anyhow::anyhow!("identity required"))?;
+        let identity = self
+            .identity
+            .ok_or_else(|| anyhow::anyhow!("identity required"))?;
         let peer = Peer::new("[::]:0".parse()?, identity)?;
         // TODO: handle known_hosts and connect to addr
         Ok(peer)

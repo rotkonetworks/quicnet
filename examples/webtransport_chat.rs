@@ -8,32 +8,32 @@ fn main() {
 #[cfg(feature = "webtransport")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use quicnet::{Identity, transport::web_compat::WebCompatServer};
-    use tokio::sync::broadcast;
     use h3::quic::BidiStream;
+    use quicnet::{Identity, transport::web_compat::WebCompatServer};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    
+    use tokio::sync::broadcast;
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install crypto provider");
-    
+
     let identity = Identity::load_or_generate()?;
     let server = WebCompatServer::new("[::]:4433".parse()?, identity).await?;
-    
+
     tokio::spawn(serve_frontend(server.cert_hash().to_string()));
-    
+
     let (tx, _) = broadcast::channel(256);
     let mut user_id = 0u64;
-    
+
     eprintln!("chat server ready");
     eprintln!("open http://localhost:8080 in chrome/firefox");
-    
+
     while let Some(session) = server.accept_webtransport().await {
         user_id += 1;
         let tx = tx.clone();
         tokio::spawn(handle_session(session, tx, user_id));
     }
-    
+
     Ok(())
 }
 
@@ -45,18 +45,20 @@ async fn handle_session(
 ) -> anyhow::Result<()> {
     use h3::quic::BidiStream;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    
+
     eprintln!("[user_{}] connected", user_id);
-    
+
     let mut rx = tx.subscribe();
     let _ = tx.send(format!("user_{} joined", user_id));
-    
+
     // send welcome message
     if let Ok(mut stream) = session.open_bi(session.session_id()).await {
-        let _ = stream.write_all(format!("Welcome! You are user_{}", user_id).as_bytes()).await;
+        let _ = stream
+            .write_all(format!("Welcome! You are user_{}", user_id).as_bytes())
+            .await;
         let _ = stream.shutdown();
     }
-    
+
     loop {
         tokio::select! {
             // handle incoming messages from client
@@ -65,11 +67,11 @@ async fn handle_session(
                     Ok(Some(h3_webtransport::server::AcceptedBi::BidiStream(_, stream))) => {
                         let tx = tx.clone();
                         let user = format!("user_{}", user_id);
-                        
+
                         tokio::spawn(async move {
                             let (mut send, mut recv) = BidiStream::split(stream);
                             let mut buf = vec![0u8; 1024];
-                            
+
                             if let Ok(n) = recv.read(&mut buf).await {
                                 if n > 0 {
                                     let msg = String::from_utf8_lossy(&buf[..n]).trim().to_string();
@@ -87,7 +89,7 @@ async fn handle_session(
                     _ => continue,
                 }
             }
-            
+
             // broadcast messages to this client
             Ok(msg) = rx.recv() => {
                 if let Ok(mut stream) = session.open_bi(session.session_id()).await {
@@ -95,11 +97,11 @@ async fn handle_session(
                     let _ = stream.shutdown();
                 }
             }
-            
+
             else => break
         }
     }
-    
+
     let _ = tx.send(format!("user_{} left", user_id));
     eprintln!("[user_{}] disconnected", user_id);
     Ok(())
@@ -107,22 +109,23 @@ async fn handle_session(
 
 #[cfg(feature = "webtransport")]
 async fn serve_frontend(cert_hash: String) {
-    use tokio::net::TcpListener;
     use tokio::io::AsyncWriteExt;
-    
+    use tokio::net::TcpListener;
+
     let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
     eprintln!("serving frontend at http://localhost:8080");
-    
+
     loop {
         let (mut stream, _) = listener.accept().await.unwrap();
         let cert_hash = cert_hash.clone();
-        
+
         tokio::spawn(async move {
             // read http request (ignore it)
             let mut buf = [0u8; 1024];
             let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
-            
-            let html = format!(r#"<!DOCTYPE html>
+
+            let html = format!(
+                r#"<!DOCTYPE html>
 <html>
 <head>
 <title>quicnet webtransport chat</title>
@@ -260,13 +263,16 @@ const hexToBuffer = (hex) => {{
 }})();
 </script>
 </body>
-</html>"#, cert_hash);
-            
+</html>"#,
+                cert_hash
+            );
+
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{}",
-                html.len(), html
+                html.len(),
+                html
             );
-            
+
             let _ = stream.write_all(response.as_bytes()).await;
             let _ = stream.shutdown().await;
         });

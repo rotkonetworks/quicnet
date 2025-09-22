@@ -1,11 +1,11 @@
 // src/identity.rs
 use anyhow::Result;
-use ed25519_dalek::{SigningKey, Signer};
+use b256::Base256;
+use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use b256::Base256;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 32]);
@@ -42,8 +42,12 @@ impl PeerId {
         anyhow::bail!("invalid peer id: expected 32 b256 chars or 64 hex chars")
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
-    pub fn short(&self) -> String { self.to_string().chars().take(8).collect() }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+    pub fn short(&self) -> String {
+        self.to_string().chars().take(8).collect()
+    }
 }
 
 impl fmt::Display for PeerId {
@@ -72,14 +76,20 @@ impl Identity {
         let signing_key = SigningKey::from_bytes(&secret);
         let verifying_key = signing_key.verifying_key();
         let peer_id = PeerId::from_public_key(&verifying_key.to_bytes());
-        Self { signing_key, peer_id }
+        Self {
+            signing_key,
+            peer_id,
+        }
     }
 
     pub fn from_bytes(secret: &[u8; 32]) -> Result<Self> {
         let signing_key = SigningKey::from_bytes(secret);
         let verifying_key = signing_key.verifying_key();
         let peer_id = PeerId::from_public_key(&verifying_key.to_bytes());
-        Ok(Self { signing_key, peer_id })
+        Ok(Self {
+            signing_key,
+            peer_id,
+        })
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -101,7 +111,7 @@ impl Identity {
 
     fn from_openssh_string(contents: &str) -> Result<Self> {
         use ssh_key::PrivateKey;
-        
+
         let private_key = PrivateKey::from_openssh(contents)?;
         let private_key = if private_key.is_encrypted() {
             let passphrase = rpassword::prompt_password("Enter passphrase: ")?;
@@ -109,7 +119,7 @@ impl Identity {
         } else {
             private_key
         };
-        
+
         match private_key.key_data() {
             ssh_key::private::KeypairData::Ed25519(keypair) => {
                 let secret = keypair.private.to_bytes();
@@ -176,32 +186,32 @@ impl Identity {
     }
 
     pub fn save_openssh(&self, path: &Path) -> Result<()> {
-        use ssh_key::{PrivateKey, PublicKey, private::Ed25519Keypair};
         use ssh_key::private::Ed25519PrivateKey;
         use ssh_key::public::Ed25519PublicKey;
-        
+        use ssh_key::{PrivateKey, PublicKey, private::Ed25519Keypair};
+
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        
+
         // save private key
         let private = Ed25519PrivateKey::from(&self.signing_key);
         let public = self.signing_key.verifying_key();
-        
+
         let keypair = Ed25519Keypair {
             private,
             public: public.into(),
         };
-        
+
         let private_key = PrivateKey::from(keypair);
         let openssh_string = private_key.to_openssh(ssh_key::LineEnding::LF)?;
-        
+
         #[cfg(unix)]
         {
             use std::fs::OpenOptions;
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
-            
+
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -212,36 +222,36 @@ impl Identity {
         }
         #[cfg(not(unix))]
         fs::write(path, openssh_string.as_bytes())?;
-        
+
         // save public key with .pub extension
         let pub_path = path.with_extension("pub");
         let public_bytes = self.signing_key.verifying_key();
         let ed25519_public = Ed25519PublicKey::from(&public_bytes);
         let public_key = PublicKey::from(ed25519_public);
-        
+
         // format: ssh-ed25519 BASE64 PEER_ID_B256
         let mut pub_string = public_key.to_openssh()?;
         pub_string.push(' ');
         pub_string.push_str(&self.peer_id.to_string());
         pub_string.push('\n');
-        
+
         #[cfg(unix)]
         {
             use std::fs::OpenOptions;
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
-            
+
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .mode(0o644)  // public key can be world-readable
+                .mode(0o644) // public key can be world-readable
                 .open(&pub_path)?;
             file.write_all(pub_string.as_bytes())?;
         }
         #[cfg(not(unix))]
         fs::write(&pub_path, pub_string.as_bytes())?;
-        
+
         Ok(())
     }
 

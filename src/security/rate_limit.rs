@@ -1,9 +1,9 @@
 // rate limiting for incoming connections
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub struct RateLimiter {
     state: Arc<Mutex<RateLimiterState>>,
@@ -25,18 +25,20 @@ impl RateLimiter {
             })),
         }
     }
-    
+
     pub fn check(&self, addr: IpAddr) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock();
-        
+
         let window = state.window;
         let max_attempts = state.max_attempts;
-        
+
         let attempts = state.attempts.entry(addr).or_insert_with(Vec::new);
         attempts.retain(|t| now.duration_since(*t) < window);
-        if state.attempts.len() > 1000 { state.attempts.retain(|_, v| !v.is_empty()); }
-        
+        if state.attempts.len() > 1000 {
+            state.attempts.retain(|_, v| !v.is_empty());
+        }
+
         if attempts.len() >= max_attempts {
             false
         } else {
