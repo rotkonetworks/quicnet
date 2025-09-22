@@ -94,11 +94,10 @@ impl Identity {
 
     pub fn from_file(path: &Path) -> Result<Self> {
         // try openssh format first
-        if let Ok(contents) = fs::read_to_string(path) {
-            if contents.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
+        if let Ok(contents) = fs::read_to_string(path)
+            && contents.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
                 return Self::from_openssh_string(&contents);
             }
-        }
         // fall back to raw 32 bytes
         let bytes = fs::read(path)?;
         if bytes.len() != 32 {

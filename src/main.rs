@@ -88,11 +88,10 @@ async fn run_listener(args: Args) -> Result<()> {
         let quiet = args.quiet;
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(incoming, echo, verbose, quiet).await {
-                if verbose {
+            if let Err(e) = handle_connection(incoming, echo, verbose, quiet).await
+                && verbose {
                     eprintln!("connection error: {}", e);
                 }
-            }
         });
     }
     Ok(())
@@ -307,8 +306,8 @@ fn parse_bind_address(bind: &str, port: u16) -> Result<SocketAddr> {
 }
 
 fn resolve_address(host: &str, default_port: u16) -> Result<SocketAddr> {
-    if host.starts_with('[') {
-        if let Some(end) = host.find(']') {
+    if host.starts_with('[')
+        && let Some(end) = host.find(']') {
             let ipv6 = &host[1..end];
             let port = if host.len() > end + 1 && host.chars().nth(end + 1) == Some(':') {
                 host[end + 2..].parse()?
@@ -319,20 +318,18 @@ fn resolve_address(host: &str, default_port: u16) -> Result<SocketAddr> {
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid address"));
         }
-    }
 
     if let Ok(addr) = host.parse::<SocketAddr>() {
         return Ok(addr);
     }
 
-    if let Some((h, p)) = host.rsplit_once(':') {
-        if let Ok(port) = p.parse::<u16>() {
+    if let Some((h, p)) = host.rsplit_once(':')
+        && let Ok(port) = p.parse::<u16>() {
             return format!("{}:{}", h, port)
                 .to_socket_addrs()?
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("cannot resolve: {}", h));
         }
-    }
 
     format!("{}:{}", host, default_port)
         .to_socket_addrs()?

@@ -47,7 +47,7 @@ impl RateLimiter {
             }
         }
         
-        let attempts = state.attempts.entry(addr).or_insert_with(Vec::new);
+        let attempts = state.attempts.entry(addr).or_default();
         attempts.retain(|t| now.duration_since(*t) < window);
         
         if attempts.len() >= max_attempts {

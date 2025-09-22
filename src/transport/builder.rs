@@ -13,6 +13,12 @@ pub struct ServerBuilder {
     audit_log: Option<AuditLog>,
 }
 
+impl Default for ServerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServerBuilder {
     pub fn new() -> Self {
         Self {
@@ -65,6 +71,12 @@ impl ServerBuilder {
 pub struct ClientBuilder {
     identity: Option<Identity>,
     known_hosts: Option<String>,
+}
+
+impl Default for ClientBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ClientBuilder {

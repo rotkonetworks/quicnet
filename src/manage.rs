@@ -35,13 +35,12 @@ pub fn authorize_pending() -> Result<()> {
         }
     } else if input != "none" {
         for part in input.split(',') {
-            if let Ok(idx) = part.trim().parse::<usize>() {
-                if idx > 0 && idx <= recent.len() {
+            if let Ok(idx) = part.trim().parse::<usize>()
+                && idx > 0 && idx <= recent.len() {
                     let (peer_id, _, _) = &recent[idx - 1];
                     append_authorized(&authorized_path, peer_id)?;
                     eprintln!("authorized: {}", peer_id);
                 }
-            }
         }
     }
     Ok(())

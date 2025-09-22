@@ -39,7 +39,7 @@ impl KnownHosts {
         let key = format!("{}:{}", host, port);
         self.hosts
             .entry(key.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(peer_id);
 
         // append to file (allows multiple keys per host)
@@ -57,14 +57,13 @@ impl KnownHosts {
         let mut hosts: HashMap<String, Vec<PeerId>> = HashMap::new();
         for line in fs::read_to_string(path)?.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() == 2 {
-                if let Ok(peer_id) = PeerId::from_str(parts[1]) {
+            if parts.len() == 2
+                && let Ok(peer_id) = PeerId::from_str(parts[1]) {
                     hosts
                         .entry(parts[0].to_string())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(peer_id);
                 }
-            }
         }
         Ok(hosts)
     }

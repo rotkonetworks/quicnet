@@ -25,11 +25,10 @@ impl AuthorizedPeers {
         let mut peers = HashSet::new();
         for line in fs::read_to_string(path)?.lines() {
             let line = line.trim();
-            if !line.is_empty() && !line.starts_with('#') {
-                if let Ok(peer_id) = PeerId::from_str(line) {
+            if !line.is_empty() && !line.starts_with('#')
+                && let Ok(peer_id) = PeerId::from_str(line) {
                     peers.insert(peer_id);
                 }
-            }
         }
         Ok(Self { peers: Some(peers) })
     }

@@ -69,12 +69,11 @@ impl Peer {
         // unified handshake as initiator
         let peer_id = auth::handshake(&conn, &self.identity, true).await?;
 
-        if let Some(expected) = expected_peer {
-            if peer_id != *expected {
+        if let Some(expected) = expected_peer
+            && peer_id != *expected {
                 conn.close(0u32.into(), b"wrong peer");
                 anyhow::bail!("expected {} but got {}", expected, peer_id);
             }
-        }
 
         Ok((conn, peer_id))
     }
@@ -92,13 +91,12 @@ impl Peer {
         let remote = incoming.remote_address();
 
         // Rate limiting by IP
-        if let Some(limiter) = &self.rate_limiter {
-            if !limiter.check(remote.ip()) {
+        if let Some(limiter) = &self.rate_limiter
+            && !limiter.check(remote.ip()) {
                 self.audit_log.log(AuditEvent::RateLimited {
                     addr: remote.to_string(),
                 });
             }
-        }
 
         match incoming.accept().await {
             Ok((conn, peer_id)) => {

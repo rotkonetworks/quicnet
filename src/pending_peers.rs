@@ -52,15 +52,12 @@ impl PendingPeers {
         // read in reverse to get most recent first
         for line in fs::read_to_string(&self.path)?.lines().rev() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                if let (Ok(timestamp), Ok(peer_id)) =
+            if parts.len() >= 3
+                && let (Ok(timestamp), Ok(peer_id)) =
                     (parts[0].parse::<u64>(), PeerId::from_str(parts[1]))
-                {
-                    if timestamp >= cutoff && seen.insert(peer_id) {
+                    && timestamp >= cutoff && seen.insert(peer_id) {
                         peers.push((peer_id, parts[2].to_string(), timestamp));
                     }
-                }
-            }
         }
         Ok(peers)
     }
