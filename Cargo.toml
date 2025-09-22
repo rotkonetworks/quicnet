@@ -33,6 +33,7 @@ rpassword = "7"
 base64 = "0.22"
 bs58 = "0.5"
 b256 = "0.4.1"
+hex = "0.4"
 
 # certificates / x509
 rcgen = "0.14"
@@ -59,12 +60,11 @@ h3-datagram = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optiona
 bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
-hex = { version = "0.4", optional = true }
 
 
 [features]
 default = []
-webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "hex", "time"]
+webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "time"]
 
 [profile.release]
 lto = true
