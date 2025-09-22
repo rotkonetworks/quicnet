@@ -1,4 +1,5 @@
 // authenticated stream abstraction over quinn
+// use tokio::io::AsyncWriteExt;
 use crate::PeerId;
 use anyhow::Result;
 use quinn::{Connection, RecvStream, SendStream};
@@ -89,5 +90,26 @@ impl AsyncWrite for AuthenticatedStream {
             Poll::Ready(Err(e)) => Poll::Ready(Err(io::Error::other(e))),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+use bincode;
+
+impl AuthenticatedStream {
+}
+
+
+use crate::protocol::{ChannelType, ControlMsg};
+
+impl AuthenticatedStream {
+    pub async fn open_channel(&self, typ: ChannelType) -> anyhow::Result<(SendStream, RecvStream)> {
+        let (mut send, recv) = self.conn.open_bi().await?;
+        
+        // send channel type as header
+        let header = bincode::serialize(&ControlMsg::ChannelOpen(typ))?;
+        send.write_all(&(header.len() as u32).to_be_bytes()).await?;
+        send.write_all(&header).await?;
+        
+        Ok((send, recv))
     }
 }

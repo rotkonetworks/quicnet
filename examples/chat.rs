@@ -4,13 +4,18 @@ use parking_lot::RwLock;
 use quicnet::{AuthenticatedStream, Identity, PeerId, ServerBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
 
 type Peers = Arc<RwLock<HashMap<PeerId, broadcast::Sender<String>>>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // install crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install crypto provider");
+
     let identity = Identity::load_or_generate()?;
 
     let server = ServerBuilder::new()
@@ -44,15 +49,14 @@ async fn handle_chat(
     let join_msg = format!("* {} joined\n", nick);
     let _ = global_tx.send(join_msg.clone());
 
-    // register peer
-    let (peer_tx, mut peer_rx) = broadcast::channel(256);
+    // register peer (peer_tx unused but kept for potential direct messaging)
+    let (peer_tx, _peer_rx) = broadcast::channel(256);
     peers.write().insert(peer_id, peer_tx);
 
     // subscribe to global
     let mut global_rx = global_tx.subscribe();
 
-    let (send, recv) = stream.split();
-    let mut send = send;
+    let (mut send, recv) = stream.split();
     let mut reader = BufReader::new(recv);
 
     loop {

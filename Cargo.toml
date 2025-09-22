@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "quicnet"
-path = "src/main.rs"
+path = "src/bin/quicnet.rs"
 
 [dependencies]
 # core transport & tls
@@ -47,6 +47,8 @@ dirs = "5"
 
 # error handling
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
 parking_lot = "0.12"
 
 # logging

@@ -7,6 +7,7 @@ pub mod peer;
 pub mod pending_peers;
 pub mod security;
 pub mod transport;
+pub mod protocol;
 
 pub use authorized_peers::AuthorizedPeers;
 pub use identity::{Identity, PeerId};
@@ -15,6 +16,7 @@ pub use peer::{IncomingConnection, Peer};
 pub use pending_peers::PendingPeers;
 pub use security::{AuditEvent, AuditLog, RateLimiter};
 pub use transport::{AuthenticatedStream, ClientBuilder, ServerBuilder};
+pub use protocol::{ChannelType, ControlMsg};
 
 pub const DEFAULT_PORT: u16 = 4433;
 pub const DEFAULT_IDENTITY: &str = ".quicnet/id_ed25519";

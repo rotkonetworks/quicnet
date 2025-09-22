@@ -8,6 +8,11 @@ use tokio::process::Command;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // install crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install crypto provider");
+
     let identity = Identity::load_or_generate()?;
 
     let server = ServerBuilder::new()
@@ -28,7 +33,8 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_shell(stream: AuthenticatedStream) -> Result<()> {
-    eprintln!("[{}] shell session started", stream.peer_id().short());
+    let peer_id = stream.peer_id();
+    eprintln!("[{}] shell session started", peer_id.short());
 
     let mut child = Command::new("/bin/bash")
         .arg("-i") // interactive
@@ -49,6 +55,6 @@ async fn handle_shell(stream: AuthenticatedStream) -> Result<()> {
         _ = io::copy(&mut recv, &mut stdin) => {},
     }
 
-    eprintln!("[{}] shell session ended", stream.peer_id().short());
+    eprintln!("[{}] shell session ended", peer_id.short());
     Ok(())
 }
