@@ -1,7 +1,7 @@
 // minimal p2p quic with identity-bound TLS and application auth
 use anyhow::Result;
 use clap::Parser;
-use quicnet::{Client, Identity, PeerId, Server, manage};
+use quicnet::{Peer, Identity, PeerId, manage};
 use quicnet::known_hosts::{KnownHosts, Trust};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -58,11 +58,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.listen {
-        run_server(args).await
+        run_listener(args).await
     } else if args.authorize {
         return manage::authorize_pending();
     } else if let Some(target) = args.target.clone() {
-        run_client(args, &target).await
+        run_dialer(args, &target).await
     } else {
         eprintln!("error: must specify either -l or a target\n");
         eprintln!("Usage: quicnet [OPTIONS] <TARGET>");
@@ -72,17 +72,17 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_server(args: Args) -> Result<()> {
+async fn run_listener(args: Args) -> Result<()> {
     let addr = parse_bind_address(&args.bind, args.port)?;
     let identity = load_identity(&args)?;
-    let server = Server::bind(addr, identity)?;
+    let peer = Peer::new(addr, identity)?;
 
     if !args.quiet {
-        eprintln!("peer id: {}", server.identity().peer_id());
-        eprintln!("listening on {}", server.local_addr()?);
+        eprintln!("peer id: {}", peer.identity().peer_id());
+        eprintln!("listening on {}", peer.local_addr()?);
     }
 
-    while let Some(incoming) = server.accept().await {
+    while let Some(incoming) = peer.accept().await {
         let echo = args.echo;
         let verbose = args.verbose;
         let quiet = args.quiet;
@@ -98,7 +98,7 @@ async fn run_server(args: Args) -> Result<()> {
     Ok(())
 }
 
-async fn run_client(args: Args, target: &str) -> Result<()> {
+async fn run_dialer(args: Args, target: &str) -> Result<()> {
     let (peer_hint, host) = parse_target(target);
     let addr = resolve_address(host, args.port)?;
     let used_port = addr.port();
@@ -110,10 +110,10 @@ async fn run_client(args: Args, target: &str) -> Result<()> {
     }
 
     let bind_addr = parse_bind_address(&args.bind, 0)?;
-    let client = Client::new(bind_addr, identity)?;
+    let peer = Peer::new(bind_addr, identity)?;
     let expected_peer = peer_hint.and_then(|h| PeerId::from_str(h).ok());
 
-    let (conn, peer_id) = client.connect(addr, expected_peer.as_ref()).await?;
+    let (conn, peer_id) = peer.dial(addr, expected_peer.as_ref()).await?;
 
     // TOFU when no explicit peer pinning
     if expected_peer.is_none() {
@@ -165,7 +165,7 @@ async fn run_client(args: Args, target: &str) -> Result<()> {
 }
 
 async fn handle_connection(
-    incoming: quicnet::server::AuthenticatedIncoming,
+    incoming: quicnet::IncomingConnection,
     echo: bool,
     verbose: bool,
     quiet: bool,
