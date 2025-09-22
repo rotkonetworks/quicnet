@@ -1,103 +1,84 @@
-# quicnet
+# README.md
 
 minimal peer-to-peer network protocol using QUIC transport and ed25519 identities.
 
-## what it is
+## Build and Development Commands
 
-quicnet provides encrypted, authenticated connections without dns or certificate
-authorities. every peer has an ed25519 identity. peers connect directly using ip
-addresses and verify each other cryptographically.
-
-think of it as ssh meets netcat over quic — your identity is your keypair, not a
-domain name.
-
-## installation
-
+### Building
 ```bash
-cargo install --path .
+cargo build                           # Debug build
+cargo build --release                 # Release build with optimizations
+cargo build --features webtransport   # Build with webtransport support
 ```
 
-## quick start
-
+### Testing
 ```bash
-# server (auto-generates ~/.ssh/id_quicnet on first run)
-quicnet -l
-
-# client
-quicnet localhost
-
-# explicit peer verification (prevents active MITM)
-quicnet εωSÎйШΜX5О4бЙìΚсÅίnÎАйÙМëжúEðЩÄÑ@localhost
+cargo test                   # Run all tests
+cargo test <TESTNAME>        # Run specific test by name
+cargo test --no-fail-fast    # Run all tests even if some fail
 ```
 
-## usage
-
-### server mode
-
+### Code Quality
 ```bash
-quicnet -l                      # listen on default port 4433
-quicnet -l -p 6667              # listen on specific port
-quicnet -l -b 192.168.1.100     # bind to address
-quicnet -l -i ~/.ssh/id_ed25519 # use specific identity
-quicnet -l --echo               # echo mode for testing
+cargo fmt           # Format code using rustfmt
+cargo clippy        # Run linter to catch common mistakes
+cargo clippy --fix  # Automatically apply lint fixes
 ```
 
-### client mode
-
+### Running
 ```bash
-quicnet example.com
-quicnet example.com:6667
-
-# peer-id pinning (recommended) - using b256 or hex encoded 32-char ids
-quicnet εωSÎйШΜX5О4бЙìΚсÅίnÎАйÙМëжúEðЩÄÑ@example.com:6667
-
-# ipv6
-quicnet [2001:db8::1]:4433
-quicnet alice@[2001:db8::1]:4433
-
-# explicit identity file
-quicnet -i ~/.ssh/id_ed25519 example.com
+cargo run -- -l              # Run server mode
+cargo run -- localhost       # Run client mode
+cargo run --example shell    # Run shell example
+cargo run --example chat     # Run chat example
 ```
 
-note on relay: --via and the coordinator module are experimental and not
-yet wired to provide a reliable relay. direct connections are supported today.
+## Architecture Overview
 
-## protocol design (updated)
+quicnet is a minimal peer-to-peer network protocol built on QUIC transport with
+Ed25519 identity-based authentication. The architecture binds cryptographic
+identities directly to the TLS layer, eliminating the need for certificate
+authorities.
 
-### identity & transport binding
+### Core Identity System
+- **PeerId**: 32-byte Ed25519 public key, encoded in base256 format
+- **Identity**: Ed25519 keypair stored in SSH-compatible format (default:
+`~/.quicnet/id_ed25519`)
+- TLS certificates are self-signed and derived from the Ed25519 identity
+- The SPKI (Subject Public Key Info) in the X.509 certificate equals the PeerId,
+preventing MITM attacks
 
-- your ed25519 keypair defines your PeerId (b256 encoded 32-byte pubkey).
-- TLS certificate is self-signed Ed25519 derived from the same key.
-- client verifies the server cert's SPKI equals expected PeerId when given.
-- this prevents relay MITM during the initial QUIC/TLS handshake.
+### Module Structure
 
-### authentication
+**Core Modules** (`src/`)
+- `identity.rs`: Ed25519 keypair management, SSH key parsing, PeerId generation
+- `client.rs`: QUIC client with identity-bound TLS verification
+- `server.rs`: QUIC server with rate limiting and audit logging capabilities
+- `auth.rs`: Application-layer challenge-response authentication protocol
 
-application-layer challenge-response (ed25519) remains, but is now redundant
-for MITM because TLS is bound to identity. it still provides clear app semantics.
+**Transport Layer** (`src/transport/`)
+- `stream.rs`: Authenticated bidirectional stream abstraction
+- `builder.rs`: Server and client configuration builders
+- `web_compat.rs`: WebTransport compatibility layer (optional feature)
 
-### wire format
+**Security Features** (`src/security/`)
+- `rate_limit.rs`: Connection rate limiting per IP
+- `audit.rs`: Security event logging system
 
-first bi-stream is used for stdin/stdout piping (client opens, server accepts).
+**Peer Management**
+- `authorized_peers.rs`: Whitelist of allowed peer identities
+- `known_hosts.rs`: Trust-on-first-use store for peer identities
+- `pending_peers.rs`: Queue for peers awaiting authorization
 
-## security
+### Protocol Flow
+1. Client initiates QUIC connection with self-signed Ed25519 certificate
+2. Server accepts with its own Ed25519 certificate
+3. Both sides verify the peer's SPKI matches expected PeerId (if provided)
+4. Application-layer challenge-response confirms mutual authentication
+5. First bi-stream is opened for stdin/stdout piping
 
-- transport encryption: TLS 1.3 over QUIC (rustls), cipher suites as chosen by
-rustls
-- identity binding: X.509 SPKI = ed25519 PeerId (prevents active MITM with
-pinned id)
-- optional app-layer ed25519 challenge-response
-
-### visible
-
-quic packet headers/timing, remote ip/port, public peer ids.
-
-## limitations
-
-- openssh key parser is simplified; may not handle all formats.
-- relay/coordinator is experimental and not wired to --via yet.
-- trust-on-first-use store is not implemented in this pass.
-
-## license
-
-mit or apache-2.0, at your option
+### Key Design Decisions
+- No DNS or certificate authorities required - identities are cryptographic keys
+- TLS binding prevents relay MITM attacks during handshake
+- Compatible with SSH Ed25519 keys for easy key management
+- Supports both direct connections and WebTransport (via optional feature flag)
