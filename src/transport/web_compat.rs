@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 #[cfg(feature = "webtransport")]
 use crate::Identity;
+#[cfg(feature = "webtransport")]
+use time::{Duration, OffsetDateTime};
 
 #[cfg(feature = "webtransport")]
 pub struct WebCompatServer {
@@ -104,48 +106,49 @@ impl WebCompatServer {
 }
 
 #[cfg(feature = "webtransport")]
-fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>, String)> {
-    use rcgen::{CertificateParams, KeyPair, CustomExtension};
-    use sha2::{Sha256, Digest};
+fn generate_self_signed_cert() -> Result<(
+    Vec<CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+    String
+)> {
+    use rcgen::{
+        CertificateParams, KeyPair, SanType, DnType, DistinguishedName,
+        ExtendedKeyUsagePurpose, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    };
+    use sha2::{Digest, Sha256};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    // generate ECDSA P-256 key for WebTransport compatibility
+    // 1) Explicit ECDSA P-256 keypair (required; RSA not allowed for this mode)
+    //    (Spec requires ECDSA P-256 to be supported as the interoperable default.)
     let kp = KeyPair::generate()?;
     let key_der_bytes = kp.serialized_der().to_vec();
 
-    let mut params = CertificateParams::new(vec![])?;
-    
-    // certificate valid from 2024 to 2026
-    params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-    params.not_after = rcgen::date_time_ymd(2026, 1, 1);
+    // 2) Short-lived cert: now-1h .. now+10d  (must be <= 14 days)
+    let now = OffsetDateTime::now_utc();
+    let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
+    params.not_before = now - Duration::hours(1);
+    params.not_after  = now + Duration::days(10);
 
-    // add subject alt names
-    params.subject_alt_names = vec![
-        rcgen::SanType::DnsName("localhost".try_into()?),
-    ];
+    // 3) SANs for localhost and loopback IPs
+    params.subject_alt_names.push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::new(127,0,0,1))));
+    params.subject_alt_names.push(SanType::IpAddress(IpAddr::V6(Ipv6Addr::LOCALHOST)));
 
-    // add custom extension for WebTransport (OID 1.3.6.1.4.1.57123.1)
-    // this OID signals the cert is for WebTransport
-    let webtransport_oid = vec![1, 3, 6, 1, 4, 1, 0x83, 0xdb, 0x63, 1];
-    params.custom_extensions = vec![
-        CustomExtension::from_oid_content(
-            &webtransport_oid,
-            vec![0x05, 0x00], // ASN.1 NULL
-        )
-    ];
+    // 4) Nice-to-have metadata
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "localhost");
+    params.distinguished_name = dn;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
 
+    // 5) Self-sign and compute the SHA-256 of the DER cert for pinning
     let cert = params.self_signed(&kp)?;
-    let cert_der = cert.der().to_vec();
-    
-    // hash the entire certificate DER
+    let cert_der_bytes = cert.der().to_vec();
     let mut hasher = Sha256::new();
-    hasher.update(&cert_der);
-    let cert_hash = hex::encode(hasher.finalize());
-    
-    let cert_der = CertificateDer::from(cert_der);
-    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        PrivatePkcs8KeyDer::from(key_der_bytes)
-    );
+    hasher.update(&cert_der_bytes);
+    let cert_hash = hex::encode(hasher.finalize()); // lower-case hex
 
+    let cert_der = CertificateDer::from(cert_der_bytes);
+    let key_der  = rustls::pki_types::PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der_bytes));
     Ok((vec![cert_der], key_der, cert_hash))
 }
 

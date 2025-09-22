@@ -64,7 +64,7 @@ hex = { version = "0.4", optional = true }
 
 [features]
 default = []
-webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "hex"]
+webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "hex", "time"]
 
 [profile.release]
 lto = true
@@ -89,3 +89,8 @@ version = "0.7"
 
 [dependencies.rustls-pemfile]
 version = "2"
+
+[dependencies.time]
+version = "0.3"
+features = ["formatting", "macros"]
+optional = true

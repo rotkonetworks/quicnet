@@ -8,7 +8,6 @@ fn main() {
 #[cfg(feature = "webtransport")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use anyhow::Result;
     use quicnet::{Identity, transport::web_compat::WebCompatServer};
     use tokio::sync::broadcast;
     use h3::quic::BidiStream;
@@ -54,7 +53,7 @@ async fn handle_session(
     
     // send welcome message
     if let Ok(mut stream) = session.open_bi(session.session_id()).await {
-        let _ = stream.write_all(format!("welcome user_{}", user_id).as_bytes()).await;
+        let _ = stream.write_all(format!("Welcome! You are user_{}", user_id).as_bytes()).await;
         let _ = stream.shutdown();
     }
     
@@ -62,25 +61,30 @@ async fn handle_session(
         tokio::select! {
             // handle incoming messages from client
             stream = session.accept_bi() => {
-                if let Some(h3_webtransport::server::AcceptedBi::BidiStream(_, stream)) = stream? {
-                    let tx = tx.clone();
-                    let user = format!("user_{}", user_id);
-                    
-                    tokio::spawn(async move {
-                        let (mut send, mut recv) = BidiStream::split(stream);
-                        let mut buf = vec![0u8; 1024];
+                match stream {
+                    Ok(Some(h3_webtransport::server::AcceptedBi::BidiStream(_, stream))) => {
+                        let tx = tx.clone();
+                        let user = format!("user_{}", user_id);
                         
-                        if let Ok(n) = recv.read(&mut buf).await {
-                            if n > 0 {
-                                let msg = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                                eprintln!("[{}] {}", user, msg);
-                                let _ = tx.send(format!("{}: {}", user, msg));
-                                // echo back acknowledgment
-                                let _ = send.write_all(b"ack").await;
-                                let _ = send.shutdown();
+                        tokio::spawn(async move {
+                            let (mut send, mut recv) = BidiStream::split(stream);
+                            let mut buf = vec![0u8; 1024];
+                            
+                            if let Ok(n) = recv.read(&mut buf).await {
+                                if n > 0 {
+                                    let msg = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                                    eprintln!("[{}] {}", user, msg);
+                                    let _ = tx.send(format!("{}: {}", user, msg));
+                                    // echo back acknowledgment
+                                    let _ = send.write_all(b"ack").await;
+                                    let _ = send.shutdown();
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
+                    Ok(None) => break,
+                    Err(_) => continue,
+                    _ => continue,
                 }
             }
             
