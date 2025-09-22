@@ -75,16 +75,16 @@ opt-level = 3
 strip = true
 
 [[example]]
-name = "shell"
-path = "examples/shell.rs"
+name = "shell_server"
+path = "examples/shell_server.rs"
 
 [[example]]
-name = "chat"
-path = "examples/chat.rs"
+name = "chat_client"
+path = "examples/chat_client.rs"
 
 [[example]]
-name = "webtransport_chat"
-path = "examples/webtransport_chat.rs"
+name = "chat_server"
+path = "examples/chat_server.rs"
 
 [dependencies.instant-acme]
 version = "0.7"

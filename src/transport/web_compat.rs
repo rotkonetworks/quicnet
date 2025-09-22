@@ -127,7 +127,7 @@ fn generate_self_signed_cert() -> Result<(
 )> {
     use rcgen::{
         CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyPair,
-        KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
+        KeyUsagePurpose, SanType,
     };
     use sha2::{Digest, Sha256};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
