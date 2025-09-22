@@ -25,20 +25,31 @@ impl RateLimiter {
             })),
         }
     }
-
+    
     pub fn check(&self, addr: IpAddr) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock();
-
+        
         let window = state.window;
         let max_attempts = state.max_attempts;
-
+        
+        // cleanup old entries periodically (before getting mutable ref)
+        if state.attempts.len() > 1000 {
+            let mut empty_keys = Vec::new();
+            for (k, v) in state.attempts.iter_mut() {
+                v.retain(|t| now.duration_since(*t) < window);
+                if v.is_empty() {
+                    empty_keys.push(*k);
+                }
+            }
+            for k in empty_keys {
+                state.attempts.remove(&k);
+            }
+        }
+        
         let attempts = state.attempts.entry(addr).or_insert_with(Vec::new);
         attempts.retain(|t| now.duration_since(*t) < window);
-        if state.attempts.len() > 1000 {
-            state.attempts.retain(|_, v| !v.is_empty());
-        }
-
+        
         if attempts.len() >= max_attempts {
             false
         } else {
