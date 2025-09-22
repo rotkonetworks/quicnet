@@ -35,6 +35,7 @@ impl RateLimiter {
         
         let attempts = state.attempts.entry(addr).or_insert_with(Vec::new);
         attempts.retain(|t| now.duration_since(*t) < window);
+        if state.attempts.len() > 1000 { state.attempts.retain(|_, v| !v.is_empty()); }
         
         if attempts.len() >= max_attempts {
             false
