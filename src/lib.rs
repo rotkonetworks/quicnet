@@ -5,6 +5,7 @@ pub mod known_hosts;
 pub mod manage;
 pub mod peer;
 pub mod pending_peers;
+pub mod relay;
 pub mod security;
 pub mod transport;
 
