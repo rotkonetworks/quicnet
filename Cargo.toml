@@ -21,7 +21,7 @@ path = "src/bin/quicnet.rs"
 # core transport & tls
 quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
-tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "net", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "net", "macros", "fs"] }
 
 # crypto
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
@@ -63,10 +63,33 @@ bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 
+# remote session deps
+x11rb = { version = "0.13", features = ["all-extensions", "composite", "damage", "shm"], optional = true }
+x11 = { version = "2.21", optional = true }
+webp = { version = "0.3", optional = true }
+minifb = { version = "0.27", optional = true }
+
+# video streaming deps
+openh264 = { version = "0.9", optional = true }
+image = { version = "0.25", optional = true }
+yuv = { version = "0.8.8", optional = true }
+h264-reader = { version = "0.6", optional = true }
+libc = "0.2"
+
+# hardware video encoding
+gstreamer = { version = "0.23", optional = true }
+gstreamer-video = { version = "0.23", optional = true }
+gstreamer-app = { version = "0.23", optional = true }
+drm = { version = "0.12", optional = true }
+nix = { version = "0.29", optional = true }
+
 
 [features]
 default = []
-webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "time"]
+webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "time", "x11rb", "x11", "webp", "minifb", "gstreamer", "gstreamer-video", "gstreamer-app", "drm", "nix"]
+remote = ["x11rb", "webp", "minifb"]
+hardware = ["gstreamer", "gstreamer-video", "gstreamer-app", "drm", "nix"]
+video = ["openh264", "image", "x11rb", "yuv", "h264-reader"]
 
 [profile.release]
 lto = true
@@ -85,6 +108,14 @@ path = "examples/chat_client.rs"
 [[example]]
 name = "chat_server"
 path = "examples/chat_server.rs"
+
+[[example]]
+name = "remote_session"
+path = "examples/remote_session.rs"
+
+[[example]]
+name = "hardware_remote"
+path = "examples/hardware_remote.rs"
 
 [dependencies.instant-acme]
 version = "0.7"

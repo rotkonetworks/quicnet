@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple H.264 Stream</title>
+</head>
+<body>
+    <video id="video" autoplay muted style="width: 100%; height: 100%;"></video>
+    <script>
+        // Use Media Source Extensions - much more reliable than WebCodecs
+        const video = document.getElementById('video');
+        const mediaSource = new MediaSource();
+        video.src = URL.createObjectURL(mediaSource);
+
+        mediaSource.addEventListener('sourceopen', async () => {
+            const sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42001E"');
+
+            // Connect to WebTransport
+            const transport = new WebTransport('https://localhost:8443', {
+                serverCertificateHashes: [{
+                    algorithm: 'sha-256',
+                    value: new Uint8Array(/* cert hash here */).buffer
+                }]
+            });
+
+            await transport.ready;
+
+            // Read H.264 stream and append to MSE
+            const reader = transport.datagrams.readable.getReader();
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                // Append H.264 data directly to MSE
+                if (!sourceBuffer.updating) {
+                    sourceBuffer.appendBuffer(value);
+                }
+            }
+        });
+    </script>
+</body>
+</html>

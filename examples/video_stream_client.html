@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>QUIC Video Stream</title>
+    <style>
+        body { margin: 0; padding: 20px; background: #111; color: white; font-family: Arial; }
+        canvas { border: 1px solid #333; background: black; }
+        .controls { margin: 10px 0; }
+        button { padding: 8px 16px; margin: 5px; }
+        .status { margin: 10px 0; color: #0f0; }
+        .stats { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #fff; }
+        .stats-line { margin: 2px 0; }
+    </style>
+</head>
+<body>
+    <h1>QUIC Video Stream Client</h1>
+    <div class="controls">
+        <button onclick="connect('mjpeg')">Connect MJPEG</button>
+        <button onclick="connect('h264')">Connect H.264 (Software)</button>
+        <button onclick="connect('h264-hw')">Connect H.264 (Hardware)</button>
+        <button onclick="disconnect()">Disconnect</button>
+        <button onclick="toggleFullscreen()">Fullscreen</button>
+        <button onclick="toggleRemoteControl()">Enable Remote Control</button>
+    </div>
+    <div class="status" id="status">Disconnected</div>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <div class="stats" id="stats" style="display: none;">
+        <div class="stats-line">FPS: <span id="fps">0</span></div>
+        <div class="stats-line">Bitrate: <span id="bitrate">0</span> kbps</div>
+        <div class="stats-line">Frames: <span id="frames">0</span></div>
+        <div class="stats-line">Codec: <span id="codec">-</span></div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const status = document.getElementById('status');
+        const stats = document.getElementById('stats');
+        let transport = null;
+        let reader = null;
+        let connected = false;
+        let remoteControlEnabled = false;
+
+        // FPS tracking
+        let frameCount = 0;
+        let lastFpsTime = performance.now();
+        let totalBytes = 0;
+        let lastBitrateTime = performance.now();
+        let currentCodec = '';
+
+        function updateStats() {
+            const now = performance.now();
+
+            // Update FPS every second
+            if (now - lastFpsTime >= 1000) {
+                const fps = Math.round(frameCount * 1000 / (now - lastFpsTime));
+                document.getElementById('fps').textContent = fps;
+                frameCount = 0;
+                lastFpsTime = now;
+            }
+
+            // Update bitrate every second
+            if (now - lastBitrateTime >= 1000) {
+                const bitrate = Math.round(totalBytes * 8 / 1000 / ((now - lastBitrateTime) / 1000));
+                document.getElementById('bitrate').textContent = bitrate;
+                totalBytes = 0;
+                lastBitrateTime = now;
+            }
+
+            document.getElementById('frames').textContent = frameCount;
+            document.getElementById('codec').textContent = currentCodec;
+        }
+
+        // Update stats every 100ms for smooth display
+        setInterval(updateStats, 100);
+
+        function hexStringToBuffer(hexString) {
+            const bytes = new Uint8Array(hexString.length / 2);
+            for (let i = 0; i < hexString.length; i += 2) {
+                bytes[i / 2] = parseInt(hexString.substr(i, 2), 16);
+            }
+            return bytes.buffer;
+        }
+
+        function setStatus(msg) {
+            status.textContent = msg;
+            console.log(msg);
+        }
+
+        async function connect(codec) {
+            if (connected) {
+                setStatus('Already connected');
+                return;
+            }
+
+            try {
+                setStatus(`Connecting with ${codec.toUpperCase()}...`);
+                currentCodec = codec === 'h264-hw' ? 'H264-HW' : codec.toUpperCase();
+                stats.style.display = 'block';
+                frameCount = 0;
+                totalBytes = 0;
+                lastFpsTime = performance.now();
+                lastBitrateTime = performance.now();
+
+                // Connect to WebTransport server
+                transport = new WebTransport('https://127.0.0.1:8443', {
+                    serverCertificateHashes: [{
+                        algorithm: 'sha-256',
+                        value: hexStringToBuffer('3c85f1418160841e93308d476174982ef141978fc5323cc4e1c55485fe8a1d78')
+                    }]
+                });
+
+                await transport.ready;
+                setStatus('Connected! Opening stream...');
+
+                // Open bidirectional stream
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+                reader = stream.readable.getReader();
+
+                // Send codec preference (2 = H.264 Hardware, 1 = H.264 Software, 0 = MJPEG)
+                const codecByte = codec === 'h264-hw' ? 2 : (codec === 'h264' ? 1 : 0);
+                await writer.write(new Uint8Array([codecByte]));
+                await writer.close();
+
+                setStatus(`Streaming ${codec.toUpperCase()}...`);
+                connected = true;
+
+                // Start receiving frames
+                receiveFrames(codec);
+
+            } catch (error) {
+                setStatus(`Connection failed: ${error.message}`);
+                console.error('Connection error:', error);
+            }
+        }
+
+        let frameBuffer = new Uint8Array();
+        let expectedFrameSize = null;
+
+        async function receiveFrames(codec) {
+            try {
+                while (connected && reader) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    // Append new data to buffer
+                    const newBuffer = new Uint8Array(frameBuffer.length + value.length);
+                    newBuffer.set(frameBuffer);
+                    newBuffer.set(value, frameBuffer.length);
+                    frameBuffer = newBuffer;
+
+                    // Try to extract complete frames
+                    while (frameBuffer.length >= 4) {
+                        // Read frame size if we don't have it yet
+                        if (expectedFrameSize === null) {
+                            expectedFrameSize = new DataView(frameBuffer.buffer, frameBuffer.byteOffset, 4).getUint32(0, false);
+                            console.log('Expected frame size:', expectedFrameSize);
+                        }
+
+                        // Check if we have a complete frame
+                        if (frameBuffer.length >= 4 + expectedFrameSize) {
+                            const frameData = frameBuffer.slice(4, 4 + expectedFrameSize);
+
+                            // Track frame statistics
+                            frameCount++;
+                            totalBytes += frameData.length;
+
+                            if (codec === 'mjpeg') {
+                                displayMJPEG(frameData);
+                            } else if (codec === 'h264' || codec === 'h264-hw') {
+                                displayH264(frameData);
+                            }
+
+                            // Remove processed frame from buffer
+                            frameBuffer = frameBuffer.slice(4 + expectedFrameSize);
+                            expectedFrameSize = null;
+                        } else {
+                            // Wait for more data
+                            break;
+                        }
+                    }
+                }
+            } catch (error) {
+                setStatus(`Receive error: ${error.message}`);
+                connected = false;
+            }
+        }
+
+        function displayMJPEG(frameData) {
+            // Create blob and image for MJPEG frame
+            const blob = new Blob([frameData], { type: 'image/jpeg' });
+            const img = new Image();
+            img.onload = () => {
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                URL.revokeObjectURL(img.src);
+            };
+            img.src = URL.createObjectURL(blob);
+        }
+
+        let h264Decoder = null;
+        let isConfigured = false;
+
+        function displayH264(frameData) {
+            // Initialize WebCodecs H.264 decoder if not already done
+            if (!h264Decoder) {
+                try {
+                    h264Decoder = new VideoDecoder({
+                        output: (frame) => {
+                            // Draw decoded frame to canvas
+                            ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+                            frame.close();
+                        },
+                        error: (e) => {
+                            console.error('H.264 decode error:', e);
+                            setStatus(`H.264 decode error: ${e.message}`);
+                            // Reset decoder on error
+                            h264Decoder = null;
+                            isConfigured = false;
+                        }
+                    });
+
+                    setStatus('H.264 decoder created, waiting for configuration...');
+                } catch (error) {
+                    setStatus(`WebCodecs not supported: ${error.message}`);
+                    return;
+                }
+            }
+
+            // Check if decoder is ready
+            if (!h264Decoder || h264Decoder.state === 'closed') {
+                console.warn('Decoder is closed, skipping frame');
+                return;
+            }
+
+            // Parse H.264 stream for NAL units
+            // Look for Annex-B start codes and NAL unit types
+            let hasKeyFrame = false;
+            let nalUnits = [];
+
+            // Simple NAL unit parser - look for start codes
+            let pos = 0;
+            while (pos < frameData.length - 4) {
+                // Look for start code: 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01
+                if ((frameData[pos] === 0 && frameData[pos + 1] === 0 && frameData[pos + 2] === 0 && frameData[pos + 3] === 1) ||
+                    (frameData[pos] === 0 && frameData[pos + 1] === 0 && frameData[pos + 2] === 1)) {
+
+                    const startCodeLen = frameData[pos + 2] === 1 ? 3 : 4;
+                    const nalStart = pos + startCodeLen;
+
+                    if (nalStart < frameData.length) {
+                        const nalType = frameData[nalStart] & 0x1F;
+                        const isIDR = nalType === 5;
+                        const isSPS = nalType === 7;
+                        const isPPS = nalType === 8;
+
+                        if (isIDR || isSPS || isPPS) {
+                            hasKeyFrame = true;
+                        }
+
+                        // Log NAL unit types for debugging
+                        if (frameCount < 10) {
+                            console.log(`NAL unit type: ${nalType}, size: ${frameData.length - pos}`);
+                        }
+                    }
+                    pos = nalStart + 1;
+                } else {
+                    pos++;
+                }
+            }
+
+            // Configure decoder on first frame (should contain SPS/PPS)
+            if (!isConfigured) {
+                try {
+                    // Use Annex-B format (with start codes)
+                    h264Decoder.configure({
+                        codec: 'avc1.42001E', // H.264 Baseline profile
+                        optimizeForLatency: true,
+                        // For Annex-B format, we don't need description
+                    });
+                    isConfigured = true;
+                    setStatus('H.264 decoder configured for Annex-B format');
+                } catch (error) {
+                    console.error('H.264 config failed:', error);
+                    setStatus(`H.264 config failed: ${error.message}`);
+                    return;
+                }
+            }
+
+            // Skip small NAL units (likely incomplete)
+            if (frameData.length < 4) {
+                console.warn(`Skipping small NAL unit: ${frameData.length} bytes`);
+                return;
+            }
+
+            // Decode the entire H.264 frame data (may contain multiple NAL units)
+            try {
+                // Ensure data has start codes - openh264 should already provide this
+                let processedData = frameData;
+
+                // Check if we need to add start codes
+                if (frameData.length > 4 &&
+                    !(frameData[0] === 0 && frameData[1] === 0 && frameData[2] === 0 && frameData[3] === 1) &&
+                    !(frameData[0] === 0 && frameData[1] === 0 && frameData[2] === 1)) {
+
+                    // Wrap in Annex-B start code
+                    processedData = new Uint8Array(frameData.length + 4);
+                    processedData[0] = 0x00;
+                    processedData[1] = 0x00;
+                    processedData[2] = 0x00;
+                    processedData[3] = 0x01;
+                    processedData.set(frameData, 4);
+                }
+
+                // Decode the complete frame
+                const chunk = new EncodedVideoChunk({
+                    type: hasKeyFrame ? 'key' : 'delta',
+                    timestamp: performance.now() * 1000, // microseconds
+                    data: processedData
+                });
+
+                if (h264Decoder.state === 'configured') {
+                    h264Decoder.decode(chunk);
+                    frameCount++;
+
+                    if (frameCount % 30 === 0) {
+                        setStatus(`H.264 streaming: ${frameCount} frames processed`);
+                    }
+                } else {
+                    console.warn('Decoder not in configured state:', h264Decoder.state);
+                }
+
+            } catch (error) {
+                console.error('H.264 decode failed:', error);
+                setStatus(`H.264 decode failed: ${error.message}`);
+
+                // Reset decoder on persistent errors
+                if (frameCount > 10 && frameCount % 30 === 0) {
+                    console.log('Resetting H.264 decoder due to errors');
+                    h264Decoder = null;
+                    isConfigured = false;
+                }
+            }
+        }
+
+        async function disconnect() {
+            connected = false;
+            if (reader) {
+                await reader.cancel();
+                reader = null;
+            }
+            if (transport) {
+                transport.close();
+                transport = null;
+            }
+            if (h264Decoder && h264Decoder.state !== 'closed') {
+                try {
+                    await h264Decoder.flush();
+                    h264Decoder.close();
+                } catch (e) {
+                    console.warn('Error closing H.264 decoder:', e);
+                }
+                h264Decoder = null;
+                isConfigured = false;
+                frameCount = 0;
+            }
+            // Reset frame buffer
+            frameBuffer = new Uint8Array();
+            expectedFrameSize = null;
+
+            // Hide stats and reset
+            stats.style.display = 'none';
+            frameCount = 0;
+            totalBytes = 0;
+            currentCodec = '';
+
+            setStatus('Disconnected');
+        }
+
+        // Fullscreen functionality
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                canvas.requestFullscreen().catch(err => {
+                    console.error('Error entering fullscreen:', err);
+                });
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        // Remote control functionality
+        function toggleRemoteControl() {
+            remoteControlEnabled = !remoteControlEnabled;
+            const button = event.target;
+            if (remoteControlEnabled) {
+                button.textContent = 'Disable Remote Control';
+                button.style.backgroundColor = '#f44';
+                setStatus('Remote control enabled - click/keyboard will control remote desktop');
+
+                // Add event listeners for mouse and keyboard
+                canvas.addEventListener('mousedown', handleMouseDown);
+                canvas.addEventListener('mouseup', handleMouseUp);
+                canvas.addEventListener('mousemove', handleMouseMove);
+                canvas.addEventListener('wheel', handleMouseWheel);
+                document.addEventListener('keydown', handleKeyDown);
+                document.addEventListener('keyup', handleKeyUp);
+
+                // Prevent context menu
+                canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+                // Focus canvas for keyboard events
+                canvas.tabIndex = 0;
+                canvas.focus();
+            } else {
+                button.textContent = 'Enable Remote Control';
+                button.style.backgroundColor = '';
+                setStatus('Remote control disabled');
+
+                // Remove event listeners
+                canvas.removeEventListener('mousedown', handleMouseDown);
+                canvas.removeEventListener('mouseup', handleMouseUp);
+                canvas.removeEventListener('mousemove', handleMouseMove);
+                canvas.removeEventListener('wheel', handleMouseWheel);
+                document.removeEventListener('keydown', handleKeyDown);
+                document.removeEventListener('keyup', handleKeyUp);
+                canvas.removeEventListener('contextmenu', e => e.preventDefault());
+            }
+        }
+
+        // Mouse event handlers
+        function handleMouseDown(e) {
+            if (!connected || !remoteControlEnabled) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
+            const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
+            sendMouseEvent('down', e.button, x, y);
+        }
+
+        function handleMouseUp(e) {
+            if (!connected || !remoteControlEnabled) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
+            const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
+            sendMouseEvent('up', e.button, x, y);
+        }
+
+        function handleMouseMove(e) {
+            if (!connected || !remoteControlEnabled) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
+            const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
+            sendMouseEvent('move', -1, x, y);
+        }
+
+        function handleMouseWheel(e) {
+            if (!connected || !remoteControlEnabled) return;
+            e.preventDefault();
+            sendMouseEvent('wheel', 0, 0, e.deltaY > 0 ? 1 : -1);
+        }
+
+        // Keyboard event handlers
+        function handleKeyDown(e) {
+            if (!connected || !remoteControlEnabled) return;
+            e.preventDefault();
+            sendKeyEvent('down', e.code, e.key);
+        }
+
+        function handleKeyUp(e) {
+            if (!connected || !remoteControlEnabled) return;
+            e.preventDefault();
+            sendKeyEvent('up', e.code, e.key);
+        }
+
+        // Send control events to server (placeholder - needs WebTransport bidirectional stream)
+        function sendMouseEvent(type, button, x, y) {
+            console.log('Mouse event:', type, button, x, y);
+            // TODO: Send via WebTransport when we have bidirectional control stream
+        }
+
+        function sendKeyEvent(type, code, key) {
+            console.log('Key event:', type, code, key);
+            // TODO: Send via WebTransport when we have bidirectional control stream
+        }
+
+        // Note: This client requires:
+        // 1. HTTPS setup with proper TLS certificates
+        // 2. WebTransport support in browser
+        // 3. For H.264: WebCodecs API implementation
+        setStatus('Ready to connect (requires HTTPS/WebTransport setup)');
+    </script>
+</body>
+</html>
