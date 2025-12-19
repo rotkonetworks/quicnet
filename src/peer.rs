@@ -215,8 +215,8 @@ impl rustls::client::danger::ServerCertVerifier for PeerIdVerifier {
             if spki.algorithm.algorithm != oid_ed25519 {
                 return Err(rustls::Error::General("server cert not Ed25519".into()));
             }
-            let pk_bits = spki.subject_public_key.data.to_owned();
-            if pk_bits.as_ref() != expected.as_bytes() {
+            let pk_bits = spki.subject_public_key.data.clone().into_owned();
+            if &pk_bits[..] != expected.as_bytes() {
                 return Err(rustls::Error::General(
                     "peer id mismatch (SPKI != expected)".into(),
                 ));

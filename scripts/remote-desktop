@@ -1,0 +1,84 @@
+#!/bin/bash
+# remote-desktop - one command remote X11 over quicnet
+#
+# First time:  remote-desktop setup bkk12
+# Then:        remote-desktop bkk12
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+QUICNET="$(dirname "$SCRIPT_DIR")"
+BIN="$QUICNET/target/release/examples/x11_proxy"
+
+case "$1" in
+setup)
+    HOST="$2"
+    [[ -z "$HOST" ]] && { echo "usage: $0 setup <host>"; exit 1; }
+
+    # Build
+    echo "Building..."
+    (cd "$QUICNET" && cargo build --release --example x11_proxy 2>/dev/null)
+
+    # Copy to remote
+    echo "Copying to $HOST..."
+    scp "$BIN" "$HOST:~/x11_proxy"
+    ssh "$HOST" "chmod +x ~/x11_proxy"
+
+    # Get remote peer ID
+    echo ""
+    echo "Getting $HOST peer ID..."
+    PEER=$(ssh "$HOST" "timeout 2 ~/x11_proxy server :0 2>&1 || true" | grep "peer id:" | awk '{print $3}')
+
+    mkdir -p ~/.quicnet
+    echo "$PEER" > ~/.quicnet/${HOST}.peer
+
+    echo ""
+    echo "=== Setup complete ==="
+    echo "$HOST peer ID: $PEER"
+    echo ""
+    echo "Now run: $0 $HOST"
+    ;;
+
+*)
+    HOST="$1"
+    [[ -z "$HOST" ]] && { echo "usage: $0 <host>  OR  $0 setup <host>"; exit 1; }
+
+    PEER=$(cat ~/.quicnet/${HOST}.peer 2>/dev/null)
+    [[ -z "$PEER" ]] && { echo "Run '$0 setup $HOST' first"; exit 1; }
+
+    LOCAL_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
+
+    echo "=== Remote desktop: $HOST ==="
+    echo ""
+
+    # Start Xephyr (windowed X server)
+    if ! command -v Xephyr &>/dev/null; then
+        echo "Install Xephyr: sudo pacman -S xorg-server-xephyr"
+        exit 1
+    fi
+
+    echo "Starting Xephyr window..."
+    Xephyr :1 -screen 1920x1080 -resizeable -title "bkk12" 2>/dev/null &
+    sleep 1
+
+    echo "Starting X11 proxy..."
+    "$BIN" server :1 &
+    sleep 1
+
+    # Get our peer ID
+    OUR_PEER=$("$BIN" server :99 2>&1 & PID=$!; sleep 0.5; kill $PID 2>/dev/null; wait $PID 2>/dev/null)
+    OUR_PEER=$(echo "$OUR_PEER" | grep "peer id:" | awk '{print $3}')
+
+    echo ""
+    echo "=== Ready ==="
+    echo ""
+    echo "On $HOST run:"
+    echo "  ~/x11_proxy client ${OUR_PEER}@${LOCAL_IP}:4433 && DISPLAY=:99 bspwm"
+    echo ""
+    echo "Or one-liner:"
+    echo "  ssh $HOST \"~/x11_proxy client ${OUR_PEER}@${LOCAL_IP}:4433 & sleep 1 && DISPLAY=:99 bspwm\""
+    echo ""
+    read -p "Press Enter to run automatically on $HOST, or Ctrl+C to do it manually..."
+
+    ssh -t "$HOST" "~/x11_proxy client ${OUR_PEER}@${LOCAL_IP}:4433 & sleep 1; DISPLAY=:99 bspwm"
+    ;;
+esac

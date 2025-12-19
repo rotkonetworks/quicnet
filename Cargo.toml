@@ -32,7 +32,7 @@ rpassword = "7"
 # encoding
 base64 = "0.22"
 bs58 = "0.5"
-b256 = "0.4.1"
+base32 = "0.4"
 hex = "0.4"
 
 # certificates / x509
@@ -54,11 +54,11 @@ parking_lot = "0.12"
 # logging
 chrono = "0.4"
 
-# webtransport deps (optional feature)
-h3 = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
-h3-quinn = { git = "https://github.com/hyperium/h3", rev = "0e54a16", features = ["datagram"], optional = true }
-h3-webtransport = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
-h3-datagram = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
+# webtransport deps - disabled for crates.io (h3 not yet published)
+# h3 = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
+# h3-quinn = { git = "https://github.com/hyperium/h3", rev = "0e54a16", features = ["datagram"], optional = true }
+# h3-webtransport = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
+# h3-datagram = { git = "https://github.com/hyperium/h3", rev = "0e54a16", optional = true }
 bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -86,7 +86,8 @@ nix = { version = "0.29", optional = true }
 
 [features]
 default = []
-webtransport = ["h3", "h3-quinn", "h3-webtransport", "h3-datagram", "bytes", "http", "sha2", "time", "x11rb", "x11", "webp", "minifb", "gstreamer", "gstreamer-video", "gstreamer-app", "drm", "nix"]
+# webtransport disabled until h3 is published to crates.io (placeholder feature)
+webtransport = []
 remote = ["x11rb", "webp", "minifb"]
 hardware = ["gstreamer", "gstreamer-video", "gstreamer-app", "drm", "nix"]
 video = ["openh264", "image", "x11rb", "yuv", "h264-reader"]
@@ -113,9 +114,6 @@ path = "examples/chat_server.rs"
 name = "remote_session"
 path = "examples/remote_session.rs"
 
-[[example]]
-name = "hardware_remote"
-path = "examples/hardware_remote.rs"
 
 [dependencies.instant-acme]
 version = "0.7"

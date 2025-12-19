@@ -1,11 +1,12 @@
 // src/identity.rs
 use anyhow::Result;
-use b256::Base256;
+use base32::Alphabet;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 32]);
@@ -15,49 +16,49 @@ impl PeerId {
         Self(*key)
     }
 
-    pub fn to_string(&self) -> String {
-        let encoded = Base256::encode(&self.0);
-        encoded.iter().collect()
-    }
-
-    pub fn from_str(s: &str) -> Result<Self> {
-        // try b256 first
-        if s.len() == 32 {
-            let chars: Vec<char> = s.chars().collect();
-            let mut char_array = ['\0'; 32];
-            char_array.copy_from_slice(&chars);
-            if let Some(bytes) = Base256::decode(&char_array) {
-                return Ok(Self(bytes));
-            }
-        }
-        // try hex
-        if s.len() == 64 {
-            let hex_bytes = s.as_bytes();
-            let mut hex_array = [0u8; 64];
-            hex_array.copy_from_slice(&hex_bytes[..64]);
-            if let Some(bytes) = Base256::hex_to_bytes(&hex_array) {
-                return Ok(Self(bytes));
-            }
-        }
-        anyhow::bail!("invalid peer id: expected 32 b256 chars or 64 hex chars")
-    }
-
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
     pub fn short(&self) -> String {
-        self.to_string().chars().take(8).collect()
+        format!("{}", self).chars().take(8).collect()
     }
 }
 
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        let encoded = base32::encode(Alphabet::RFC4648 { padding: false }, &self.0);
+        write!(f, "{}", encoded)
     }
 }
+
 impl fmt::Debug for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}", self)
+    }
+}
+
+impl FromStr for PeerId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // try base32 first (52 chars for 32 bytes)
+        if s.len() == 52
+            && let Some(bytes_vec) = base32::decode(Alphabet::RFC4648 { padding: false }, s)
+                && bytes_vec.len() == 32 {
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&bytes_vec);
+                    return Ok(Self(bytes));
+                }
+        // try hex for backwards compatibility
+        if s.len() == 64
+            && let Ok(bytes_vec) = hex::decode(s)
+                && bytes_vec.len() == 32 {
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&bytes_vec);
+                    return Ok(Self(bytes));
+                }
+        anyhow::bail!("invalid peer id: expected 52 base32 chars or 64 hex chars")
     }
 }
 
@@ -228,7 +229,7 @@ impl Identity {
         let ed25519_public = Ed25519PublicKey::from(&public_bytes);
         let public_key = PublicKey::from(ed25519_public);
 
-        // format: ssh-ed25519 BASE64 PEER_ID_B256
+        // format: ssh-ed25519 BASE64 PEER_ID_BASE32
         let mut pub_string = public_key.to_openssh()?;
         pub_string.push(' ');
         pub_string.push_str(&self.peer_id.to_string());

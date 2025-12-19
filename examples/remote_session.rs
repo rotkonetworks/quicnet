@@ -3,6 +3,60 @@ use quicnet::{Identity, Peer};
 use tokio::io::AsyncReadExt;
 use x11rb::connection::Connection;
 
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+enum VideoCodec {
+    WebP,
+    H264Software,
+    H264Hardware,
+}
+
+#[cfg(feature = "webtransport")]
+use std::process::{Command, Stdio};
+
+// Simple H.264 encoder using ffmpeg for hardware acceleration
+struct H264Encoder {
+    width: u32,
+    height: u32,
+}
+
+#[cfg(feature = "webtransport")]
+impl H264Encoder {
+    fn new_hardware(width: u32, height: u32) -> Result<Self> {
+        eprintln!("Initializing H.264 hardware encoder {}x{}", width, height);
+        Ok(H264Encoder { width, height })
+    }
+
+    fn encode_frame(&self, rgba_data: &[u8]) -> Result<Vec<u8>> {
+        // Use ffmpeg for fast H.264 encoding with hardware acceleration
+        let mut cmd = Command::new("ffmpeg")
+            .args([
+                "-f", "rawvideo",
+                "-pix_fmt", "rgba",
+                "-s", &format!("{}x{}", self.width, self.height),
+                "-r", "60", // 60 FPS
+                "-i", "-", // stdin
+                "-c:v", "h264_vaapi", // Hardware encoder (fallback to libx264 if needed)
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-b:v", "8M", // 8 Mbps
+                "-f", "h264",
+                "-"
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        if let Some(stdin) = cmd.stdin.take() {
+            std::io::Write::write_all(&mut &stdin, rgba_data)?;
+        }
+
+        let output = cmd.wait_with_output()?;
+        Ok(output.stdout)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -123,6 +177,14 @@ async fn web_input_handler(
 async fn web_screen_sender(
     session: std::sync::Arc<h3_webtransport::server::WebTransportSession<h3_quinn::Connection, bytes::Bytes>>,
 ) -> Result<()> {
+    web_screen_sender_with_codec(session, VideoCodec::H264Hardware).await
+}
+
+#[cfg(feature = "webtransport")]
+async fn web_screen_sender_with_codec(
+    session: std::sync::Arc<h3_webtransport::server::WebTransportSession<h3_quinn::Connection, bytes::Bytes>>,
+    codec: VideoCodec,
+) -> Result<()> {
     use x11rb::protocol::{composite, damage, shm, xproto};
     use x11rb::protocol::xproto::ImageFormat;
 
@@ -157,24 +219,61 @@ async fn web_screen_sender(
 
     let mut frame_counter = 0u32;
     let mut last_frame_hash = 0u64;
-    let mut quality = 40.0; // Start with lower quality for speed
-    let target_fps = 24.0; // More reasonable target
+    let quality = 40.0; // Start with lower quality for speed
+    let target_fps = 60.0; // 60 FPS for hardware encoding
     let frame_time = std::time::Duration::from_secs_f64(1.0 / target_fps);
 
+    // Initialize encoder based on codec choice
+    let h264_encoder = match codec {
+        VideoCodec::H264Hardware | VideoCodec::H264Software => {
+            match H264Encoder::new_hardware(width as u32, height as u32) {
+                Ok(enc) => {
+                    eprintln!("H.264 hardware encoder initialized successfully");
+                    Some(enc)
+                }
+                Err(e) => {
+                    eprintln!("Failed to initialize H.264 encoder: {}, falling back to WebP", e);
+                    None
+                }
+            }
+        }
+        VideoCodec::WebP => None,
+    };
+
+    let final_codec = if h264_encoder.is_some() {
+        match codec {
+            VideoCodec::H264Hardware => VideoCodec::H264Hardware,
+            VideoCodec::H264Software => VideoCodec::H264Software,
+            _ => VideoCodec::H264Hardware,
+        }
+    } else {
+        VideoCodec::WebP
+    };
+
+    eprintln!("Using codec: {:?}", final_codec);
+
     // Channel for async encoding (small buffer to avoid memory buildup)
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>, String)>(1);
 
     // Spawn encoder task
     let session_clone = session.clone();
     tokio::spawn(async move {
-        while let Some((frame_id, webp_data)) = rx.recv().await {
-            eprintln!("Sending frame {} to client, size: {} bytes", frame_id, webp_data.len());
+        while let Some((frame_id, encoded_data, content_type)) = rx.recv().await {
+            eprintln!("Sending frame {} ({}) to client, size: {} bytes", frame_id, content_type, encoded_data.len());
             if let Ok(mut stream) = session_clone.open_bi(session_clone.session_id()).await {
                 use tokio::io::AsyncWriteExt;
-                let mut data = Vec::with_capacity(8 + webp_data.len());
+
+                // Send frame header with content type info
+                let content_type_bytes = content_type.as_bytes();
+                let header_size = 8 + 1 + content_type_bytes.len();
+                let mut data = Vec::with_capacity(header_size + encoded_data.len());
+
                 data.extend_from_slice(&frame_id.to_le_bytes());
-                data.extend_from_slice(&(webp_data.len() as u32).to_le_bytes());
-                data.extend_from_slice(&webp_data);
+                data.extend_from_slice(&(encoded_data.len() as u32).to_le_bytes());
+                data.extend_from_slice(&[content_type_bytes.len() as u8]);
+                data.extend_from_slice(content_type_bytes);
+                data.extend_from_slice(&encoded_data);
+
                 match stream.write_all(&data).await {
                     Ok(_) => eprintln!("Frame {} sent successfully", frame_id),
                     Err(e) => eprintln!("Error sending frame {}: {}", frame_id, e),
@@ -185,7 +284,7 @@ async fn web_screen_sender(
         }
     });
 
-    let mut last_capture = std::time::Instant::now();
+    let _last_capture = std::time::Instant::now();
 
     loop {
         let loop_start = std::time::Instant::now();
@@ -246,13 +345,48 @@ async fn web_screen_sender(
         // Send to encoder if not busy
         if tx.capacity() > 0 {
             let tx_clone = tx.clone();
-            eprintln!("Encoding frame {}", frame_id);
-            tokio::task::spawn_blocking(move || {
-                let encoder = webp::Encoder::from_rgba(&rgba, width_u32, height_u32);
-                let webp_data = encoder.encode(quality_copy).to_vec();
-                eprintln!("Frame {} encoded, size: {} bytes", frame_id, webp_data.len());
-                let _ = tx_clone.blocking_send((frame_id, webp_data));
-            });
+            let codec_copy = final_codec;
+            eprintln!("Encoding frame {} with {:?}", frame_id, codec_copy);
+
+            match codec_copy {
+                VideoCodec::H264Hardware | VideoCodec::H264Software => {
+                    if h264_encoder.is_some() {
+                        // Clone encoder parameters for the blocking task
+                        let encoder_width = width as u32;
+                        let encoder_height = height as u32;
+                        tokio::task::spawn_blocking(move || {
+                            let encoder = H264Encoder::new_hardware(encoder_width, encoder_height);
+                            match encoder.and_then(|enc| enc.encode_frame(&rgba)) {
+                                Ok(h264_data) => {
+                                    if !h264_data.is_empty() {
+                                        eprintln!("Frame {} H.264 encoded, size: {} bytes", frame_id, h264_data.len());
+                                        let _ = tx_clone.blocking_send((frame_id, h264_data, "video/h264".to_string()));
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("H.264 encoding failed: {}", e);
+                                }
+                            }
+                        });
+                    } else {
+                        // Fallback to WebP if H.264 encoder failed
+                        tokio::task::spawn_blocking(move || {
+                            let encoder = webp::Encoder::from_rgba(&rgba, width_u32, height_u32);
+                            let webp_data = encoder.encode(quality_copy).to_vec();
+                            eprintln!("Frame {} WebP encoded (fallback), size: {} bytes", frame_id, webp_data.len());
+                            let _ = tx_clone.blocking_send((frame_id, webp_data, "image/webp".to_string()));
+                        });
+                    }
+                }
+                VideoCodec::WebP => {
+                    tokio::task::spawn_blocking(move || {
+                        let encoder = webp::Encoder::from_rgba(&rgba, width_u32, height_u32);
+                        let webp_data = encoder.encode(quality_copy).to_vec();
+                        eprintln!("Frame {} WebP encoded, size: {} bytes", frame_id, webp_data.len());
+                        let _ = tx_clone.blocking_send((frame_id, webp_data, "image/webp".to_string()));
+                    });
+                }
+            }
         } else {
             eprintln!("Encoder busy, skipping frame {}", frame_id);
         }
@@ -289,6 +423,7 @@ async fn serve_web_client(cert_hash: String) -> Result<()> {
 body {{ margin: 0; overflow: hidden; background: #000; }}
 canvas {{ display: block; image-rendering: pixelated; cursor: none; }}
 #info {{ position: absolute; top: 10px; left: 10px; color: #0f0; font-family: monospace; z-index: 100; }}
+#stats {{ position: absolute; top: 40px; left: 10px; color: #0f0; font-family: monospace; z-index: 100; font-size: 12px; }}
 #controls {{ position: absolute; top: 10px; right: 10px; z-index: 100; }}
 button {{
     background: #333; color: #0f0; border: 1px solid #0f0;
@@ -302,10 +437,14 @@ button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
 </head>
 <body>
 <div id="info">connecting...</div>
+<div id="stats">
+    FPS: <span id="fps">0</span> | Codec: <span id="codec">-</span> | Bitrate: <span id="bitrate">0</span> Kbps | Frames: <span id="frameCount">0</span>
+</div>
 <div id="controls">
     <button id="enableInput">Enable Input</button>
     <button id="disableInput">Disable Input</button>
     <button id="quality">Quality: 85%</button>
+    <button id="codecBtn">Codec: H.264</button>
 </div>
 <canvas id="screen"></canvas>
 
@@ -316,10 +455,59 @@ const ctx = canvas.getContext('2d');
 const enableBtn = document.getElementById('enableInput');
 const disableBtn = document.getElementById('disableInput');
 const qualityBtn = document.getElementById('quality');
+const fpsSpan = document.getElementById('fps');
+const codecSpan = document.getElementById('codec');
+const bitrateSpan = document.getElementById('bitrate');
+const frameCountSpan = document.getElementById('frameCount');
 
 let inputEnabled = false;
 let inputStream = null;
 let currentQuality = 85;
+
+// Performance tracking
+let frameCount = 0;
+let totalBytes = 0;
+let lastFpsTime = performance.now();
+let lastBitrateTime = performance.now();
+let currentCodec = 'Unknown';
+
+// H.264 decoder
+let h264Decoder = null;
+let isDecoderReady = false;
+
+// Initialize H.264 decoder
+function initH264Decoder() {{
+    if ('VideoDecoder' in window) {{
+        h264Decoder = new VideoDecoder({{
+            output: (frame) => {{
+                // Draw the decoded frame to canvas
+                if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {{
+                    canvas.width = frame.displayWidth;
+                    canvas.height = frame.displayHeight;
+                    canvas.style.width = Math.min(window.innerWidth, frame.displayWidth) + 'px';
+                    canvas.style.height = Math.min(window.innerHeight, frame.displayHeight) + 'px';
+                }}
+
+                ctx.drawImage(frame, 0, 0);
+                frame.close();
+            }},
+            error: (error) => {{
+                console.error('H.264 decoder error:', error);
+                info.textContent = 'H.264 decoder error: ' + error.message;
+            }}
+        }});
+
+        h264Decoder.configure({{
+            codec: 'avc1.42001E', // H.264 baseline profile
+            optimizeForLatency: true
+        }});
+
+        isDecoderReady = true;
+        console.log('H.264 decoder initialized');
+    }} else {{
+        console.warn('WebCodecs not supported, H.264 decoding unavailable');
+    }}
+}}
 
 // key mappings (Linux input event codes)
 const keyMap = {{
@@ -342,6 +530,9 @@ const keyMap = {{
 
         await transport.ready;
         info.textContent = 'connected';
+
+        // Initialize H.264 decoder
+        initH264Decoder();
 
         // setup input stream
         inputStream = await transport.createBidirectionalStream();
@@ -489,15 +680,15 @@ const keyMap = {{
                 const reader2 = stream.readable.getReader();
 
                 try {{
-                    // read frame header (8 bytes)
-                    let headerData = new Uint8Array(8);
+                    // read basic header (8 bytes: frameId + size)
+                    let basicHeader = new Uint8Array(8);
                     let headerOffset = 0;
 
                     while (headerOffset < 8) {{
                         const {{ value: chunk }} = await reader2.read();
                         if (!chunk) break;
                         const copySize = Math.min(chunk.length, 8 - headerOffset);
-                        headerData.set(chunk.slice(0, copySize), headerOffset);
+                        basicHeader.set(chunk.slice(0, copySize), headerOffset);
                         headerOffset += copySize;
 
                         // save extra data if we read too much
@@ -508,8 +699,50 @@ const keyMap = {{
 
                     if (headerOffset < 8) continue;
 
-                    const frameId = new DataView(headerData.buffer).getUint32(0, true);
-                    const size = new DataView(headerData.buffer).getUint32(4, true);
+                    const frameId = new DataView(basicHeader.buffer).getUint32(0, true);
+                    const size = new DataView(basicHeader.buffer).getUint32(4, true);
+
+                    // read content type length (1 byte)
+                    let contentTypeLenBuf = new Uint8Array(1);
+                    if (!extraData || extraData.length === 0) {{
+                        const {{ value: chunk }} = await reader2.read();
+                        if (!chunk) continue;
+                        contentTypeLenBuf[0] = chunk[0];
+                        if (chunk.length > 1) {{
+                            extraData = chunk.slice(1);
+                        }} else {{
+                            extraData = new Uint8Array(0);
+                        }}
+                    }} else {{
+                        contentTypeLenBuf[0] = extraData[0];
+                        extraData = extraData.slice(1);
+                    }}
+
+                    const contentTypeLen = contentTypeLenBuf[0];
+
+                    // read content type string
+                    let contentTypeData = new Uint8Array(contentTypeLen);
+                    let ctOffset = 0;
+                    if (extraData && extraData.length > 0) {{
+                        const copySize = Math.min(extraData.length, contentTypeLen);
+                        contentTypeData.set(extraData.slice(0, copySize), 0);
+                        ctOffset = copySize;
+                        extraData = extraData.slice(copySize);
+                    }}
+
+                    while (ctOffset < contentTypeLen) {{
+                        const {{ value: chunk }} = await reader2.read();
+                        if (!chunk) break;
+                        const copySize = Math.min(chunk.length, contentTypeLen - ctOffset);
+                        contentTypeData.set(chunk.slice(0, copySize), ctOffset);
+                        ctOffset += copySize;
+                        if (chunk.length > copySize) {{
+                            extraData = chunk.slice(copySize);
+                        }}
+                    }}
+
+                    const contentType = new TextDecoder().decode(contentTypeData);
+                    currentCodec = contentType === 'video/h264' ? 'H.264' : 'WebP';
 
                     console.log(`Received frame ${{frameId}}, size: ${{size}} bytes`);
 
@@ -537,23 +770,71 @@ const keyMap = {{
                         continue;
                     }}
 
-                    // decode webp
-                    const blob = new Blob([frameData], {{ type: 'image/webp' }});
-                    const img = new Image();
-                    img.onload = () => {{
-                        if (canvas.width !== img.width || canvas.height !== img.height) {{
-                            canvas.width = img.width;
-                            canvas.height = img.height;
-                            canvas.style.width = Math.min(window.innerWidth, img.width) + 'px';
-                            canvas.style.height = Math.min(window.innerHeight, img.height) + 'px';
+                    // Update performance stats
+                    frameCount++;
+                    totalBytes += size;
+                    const now = performance.now();
+
+                    // Update FPS every second
+                    if (now - lastFpsTime >= 1000) {{
+                        const fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+                        fpsSpan.textContent = fps;
+                        frameCount = 0;
+                        lastFpsTime = now;
+                    }}
+
+                    // Update bitrate every 2 seconds
+                    if (now - lastBitrateTime >= 2000) {{
+                        const bitrate = Math.round((totalBytes * 8) / ((now - lastBitrateTime) / 1000) / 1000);
+                        bitrateSpan.textContent = bitrate;
+                        totalBytes = 0;
+                        lastBitrateTime = now;
+                    }}
+
+                    // Update UI
+                    codecSpan.textContent = currentCodec;
+                    frameCountSpan.textContent = parseInt(frameCountSpan.textContent) + 1;
+
+                    // Decode based on content type
+                    if (contentType === 'video/h264') {{
+                        // Use WebCodecs H.264 decoder
+                        if (isDecoderReady && h264Decoder) {{
+                            try {{
+                                const chunk = new EncodedVideoChunk({{
+                                    type: 'key', // Assume keyframe for now
+                                    timestamp: performance.now() * 1000, // Convert to microseconds
+                                    data: frameData
+                                }});
+
+                                h264Decoder.decode(chunk);
+                                console.log(`H.264 frame ${{frameId}} decoded, size: ${{size}} bytes`);
+                            }} catch (error) {{
+                                console.error(`H.264 decode error for frame ${{frameId}}:`, error);
+                                info.textContent = `H.264 decode error: ${{error.message}}`;
+                            }}
+                        }} else {{
+                            console.log(`H.264 frame ${{frameId}} received but decoder not ready`);
+                            info.textContent = `H.264 decoder not ready`;
                         }}
-                        ctx.drawImage(img, 0, 0);
-                        console.log(`Frame ${{frameId}} displayed`);
-                    }};
-                    img.onerror = () => {{
-                        console.error(`Failed to decode frame ${{frameId}}`);
-                    }};
-                    img.src = URL.createObjectURL(blob);
+                    }} else {{
+                        // Handle WebP/other image formats
+                        const blob = new Blob([frameData], {{ type: contentType }});
+                        const img = new Image();
+                        img.onload = () => {{
+                            if (canvas.width !== img.width || canvas.height !== img.height) {{
+                                canvas.width = img.width;
+                                canvas.height = img.height;
+                                canvas.style.width = Math.min(window.innerWidth, img.width) + 'px';
+                                canvas.style.height = Math.min(window.innerHeight, img.height) + 'px';
+                            }}
+                            ctx.drawImage(img, 0, 0);
+                            console.log(`Frame ${{frameId}} displayed`);
+                        }};
+                        img.onerror = () => {{
+                            console.error(`Failed to decode frame ${{frameId}}`);
+                        }};
+                        img.src = URL.createObjectURL(blob);
+                    }}
                 }} finally {{
                     reader2.releaseLock();
                 }}

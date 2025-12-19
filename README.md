@@ -71,5 +71,5 @@ with base256/hex encoding
 - **Symmetric design**: Single `Peer` type handles both dialing and accepting
 - **TLS binding**: Prevents relay MITM attacks during handshake
 - **SSH compatibility**: Reuses existing Ed25519 SSH keys when available
-- **Visual distinctiveness**: Base256 encoding forces copy-paste behavior for security
+- **URL-safe encoding**: Base32 encoding works in URLs and is case-insensitive
 - **WebTransport ready**: Optional feature for browser compatibility

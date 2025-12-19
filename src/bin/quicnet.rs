@@ -110,7 +110,7 @@ async fn run_dialer(args: Args, target: &str) -> Result<()> {
 
     let bind_addr = parse_bind_address(&args.bind, 0)?;
     let peer = Peer::new(bind_addr, identity)?;
-    let expected_peer = peer_hint.and_then(|h| PeerId::from_str(h).ok());
+    let expected_peer = peer_hint.and_then(|h| h.parse::<PeerId>().ok());
 
     let (conn, peer_id) = peer.dial(addr, expected_peer.as_ref()).await?;
 

@@ -58,7 +58,7 @@ impl KnownHosts {
         for line in fs::read_to_string(path)?.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() == 2
-                && let Ok(peer_id) = PeerId::from_str(parts[1]) {
+                && let Ok(peer_id) = parts[1].parse::<PeerId>() {
                     hosts
                         .entry(parts[0].to_string())
                         .or_default()

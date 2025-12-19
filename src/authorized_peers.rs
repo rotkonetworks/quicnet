@@ -26,7 +26,7 @@ impl AuthorizedPeers {
         for line in fs::read_to_string(path)?.lines() {
             let line = line.trim();
             if !line.is_empty() && !line.starts_with('#')
-                && let Ok(peer_id) = PeerId::from_str(line) {
+                && let Ok(peer_id) = line.parse::<PeerId>() {
                     peers.insert(peer_id);
                 }
         }

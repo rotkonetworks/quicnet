@@ -54,7 +54,7 @@ impl PendingPeers {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3
                 && let (Ok(timestamp), Ok(peer_id)) =
-                    (parts[0].parse::<u64>(), PeerId::from_str(parts[1]))
+                    (parts[0].parse::<u64>(), parts[1].parse::<PeerId>())
                     && timestamp >= cutoff && seen.insert(peer_id) {
                         peers.push((peer_id, parts[2].to_string(), timestamp));
                     }
